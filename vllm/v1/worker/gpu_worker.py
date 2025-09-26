@@ -6,11 +6,10 @@ import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
@@ -30,7 +29,6 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import (
-    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
@@ -47,7 +45,6 @@ from vllm.tracing import instrument
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -87,7 +84,18 @@ class Worker(WorkerBase):
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
-        torch.set_float32_matmul_precision(precision)
+        torch.backends.cuda.matmul.fp32_precision = precision
+        #torch.set_float32_matmul_precision(precision)
+
+        from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
+
+        self.elastic_ep_executor = ElasticEPScalingExecutor(self)
+
+        if self.model_config.trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils.import_utils import init_cached_hf_modules
+
+            init_cached_hf_modules()
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
@@ -286,12 +294,26 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self) -> None:
-        eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with (
-            self._maybe_get_memory_pool_context(tag="weights"),
-            set_current_vllm_config(self.vllm_config),
-        ):
-            self.model_runner.load_model(eep_scale_up=eep_scale_up)
+        dummy_weights = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
+        if dummy_weights:
+            (
+                expanded_physical_to_logical,
+                num_logical_experts,
+                old_num_physical_experts,
+            ) = self.elastic_ep_executor.receive_expert_mapping()
+            num_physical_experts = expanded_physical_to_logical.shape[1]
+            self.parallel_config.eplb_config.num_redundant_experts = (
+                num_physical_experts - num_logical_experts
+            )
+
+        with self._maybe_get_memory_pool_context(tag="weights"):
+            self.model_runner.load_model(dummy_weights=dummy_weights)
+
+        if dummy_weights:
+            self.model_runner.setup_eplb_from_mapping(
+                expanded_physical_to_logical, old_num_physical_experts
+            )
+            self.model_runner.eep_eplb_suppressed = True
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -1025,6 +1047,9 @@ class Worker(WorkerBase):
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
+
+    def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
+        return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
 
 def init_worker_distributed_environment(

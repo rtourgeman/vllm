@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 
 def start_async_worker(
     state: "EplbState",
-    rank_mapping: dict[int, int] | None = None,
     is_profile: bool = False,
 ) -> threading.Thread:
     eplb_group = get_eplb_group().device_group
@@ -105,7 +104,7 @@ def run_rebalance_experts(
 async def transfer_run_periodically(
     state: "EplbState",
     eplb_group: ProcessGroup,
-    cuda_stream: torch.cuda.Stream,
+    cuda_stream: torch.cuda.Stream = None,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
 ) -> None:
@@ -176,7 +175,6 @@ async def transfer_run_periodically(
                             ep_group=eplb_group,
                             is_profile=is_profile,
                             cuda_stream=cuda_stream,
-                            rank_mapping=rank_mapping,
                         )
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)
