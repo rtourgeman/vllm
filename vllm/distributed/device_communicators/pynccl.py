@@ -5,7 +5,7 @@
 # ===================== import region =====================
 import torch
 import torch.distributed as dist
-from torch.distributed import ProcessGroup, ReduceOp
+from torch.distributed import ProcessGroup, ReduceOp, P2POp
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl_wrapper import (

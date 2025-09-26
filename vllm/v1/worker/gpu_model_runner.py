@@ -3320,6 +3320,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
+        if not (num_tokens <= self.scheduler_config.max_num_batched_tokens):
+            logger.info(f"num_tokens: {num_tokens}, max_num_batched_tokens: {self.scheduler_config.max_num_batched_tokens}")
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:

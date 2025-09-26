@@ -1146,6 +1146,7 @@ class DPEngineCoreProc(EngineCoreProc):
         self.step_counter = 0
         self.current_wave = 0
         self.last_counts = (0, 0)
+        self.elastic_scaling_state = None
 
         from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 

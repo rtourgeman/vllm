@@ -1230,7 +1230,6 @@ def init_distributed_environment(
     global _WORLD, _NODE_COUNT
     if enable_elastic_ep:
         from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
-
         # Create stateless world group with all ranks
         assert _WORLD is None, "world group already initialized"
         parallel_config = config.parallel_config
@@ -1585,6 +1584,89 @@ def switch_to_standby_groups() -> None:
     assert _DP is not None
     assert _EP is not None
     assert _WORLD is not None
+    _DP.destroy()
+    _EP.destroy()
+    _WORLD.destroy()
+    _DP = _STANDBY_DP
+    _EP = _STANDBY_EP
+    _WORLD = _STANDBY_WORLD
+    _NODE_COUNT = _STANDBY_WORLD_NODE_COUNT
+    _STANDBY_DP = None
+    _STANDBY_EP = None
+    _STANDBY_WORLD = None
+    _STANDBY_WORLD_NODE_COUNT = None
+
+
+def create_standby_groups(
+    new_dp_size: int,
+    new_world_size_across_dp: int,
+    master_ip: str,
+    world_group_ports: list[list[int]],
+    dp_group_ports: list[list[int]],
+    ep_group_ports: list[list[int]],
+    backend: Optional[str] = None,
+) -> None:
+    from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+
+    global _STANDBY_WORLD, _STANDBY_WORLD_NODE_COUNT, _STANDBY_DP, _STANDBY_EP
+
+    assert new_world_size_across_dp == torch.distributed.get_world_size() * new_dp_size
+    backend = backend or get_world_group().backend
+    local_rank = get_world_group().local_rank
+    global_rank = get_world_group().rank
+
+    standby_world_ranks = [list(range(new_world_size_across_dp))]
+    _STANDBY_WORLD = StatelessGroupCoordinator(
+        group_ranks=standby_world_ranks,
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_device_communicator=False,
+        group_name="world",
+        host=master_ip,
+        group_ports=world_group_ports,
+        global_rank=global_rank,
+        global_world_size=new_world_size_across_dp,
+    )
+    _STANDBY_WORLD_NODE_COUNT = _node_count(_STANDBY_WORLD.tcp_store_group)
+
+    tp_size = get_tp_group().world_size
+    pp_size = get_pp_group().world_size
+
+    all_ranks = torch.arange(new_world_size_across_dp).reshape(
+        -1, new_dp_size, pp_size, tp_size)
+    standby_dp_ranks = all_ranks.transpose(1, 3).reshape(-1, new_dp_size).unbind(0)
+    standby_dp_ranks = [x.tolist() for x in standby_dp_ranks]
+    _STANDBY_DP = StatelessGroupCoordinator(
+        group_ranks=standby_dp_ranks,
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_device_communicator=True,
+        group_name="dp",
+        host=master_ip,
+        group_ports=dp_group_ports,
+        global_rank=global_rank,
+        global_world_size=new_world_size_across_dp,
+    )
+
+    standby_ep_ranks = all_ranks.transpose(1, 2).reshape(
+        -1, new_dp_size * tp_size).unbind(0)
+    standby_ep_ranks = [x.tolist() for x in standby_ep_ranks]
+    _STANDBY_EP = StatelessGroupCoordinator(
+        group_ranks=standby_ep_ranks,
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_device_communicator=True,
+        group_name="ep",
+        host=master_ip,
+        group_ports=ep_group_ports,
+        global_rank=global_rank,
+        global_world_size=new_world_size_across_dp,
+    )
+
+
+def switch_to_standby_groups() -> None:
+    global _WORLD, _STANDBY_WORLD, _NODE_COUNT, _STANDBY_WORLD_NODE_COUNT
+    global _DP, _EP, _STANDBY_DP, _STANDBY_EP
     _DP.destroy()
     _EP.destroy()
     _WORLD.destroy()

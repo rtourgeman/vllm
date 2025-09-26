@@ -159,6 +159,15 @@ class EplbState:
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
     """
+    
+    num_valid_physical_experts: int = 0
+    """
+    Number of valid physical experts.
+    This is the number of physical experts that are
+    actually mapped to logical experts. In elastic EP,
+    newly started EP ranks may not have physical experts
+    mapped yet.
+    """
 
     num_valid_physical_experts: int = 0
     """

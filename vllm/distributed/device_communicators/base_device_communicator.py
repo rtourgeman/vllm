@@ -114,7 +114,6 @@ class DeviceCommunicatorBase:
 
         # Check if this is a stateless process group
         from torch.distributed.distributed_c10d import _world
-
         is_stateless = _world.pg_map.get(cpu_group, None) is None
 
         if is_stateless:

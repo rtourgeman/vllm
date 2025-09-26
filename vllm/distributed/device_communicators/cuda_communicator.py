@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
 
 from ..utils import StatelessProcessGroup
 from .base_device_communicator import DeviceCommunicatorBase
+from ..utils import StatelessProcessGroup
 
 logger = init_logger(__name__)
 

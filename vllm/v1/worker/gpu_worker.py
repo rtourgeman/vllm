@@ -78,6 +78,9 @@ class Worker(WorkerBase):
 
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
 
+        from vllm.distributed.elastic_ep.elastic_execute import ElasticScalingExecutor
+        self.elastic_scaling_executor = ElasticScalingExecutor(self)
+
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils.import_utils import init_cached_hf_modules

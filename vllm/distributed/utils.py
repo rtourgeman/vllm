@@ -171,6 +171,10 @@ class StatelessProcessGroup:
         self.recv_src_counter = {i: 0 for i in range(self.world_size)}
         self.broadcast_recv_src_counter = {i: 0 for i in range(self.world_size)}
 
+    def size(self) -> int:
+        """Return the world size of the process group."""
+        return self.world_size
+
     def send_obj(self, obj: Any, dst: int):
         """Send an object to a destination rank."""
         self.expire_data()

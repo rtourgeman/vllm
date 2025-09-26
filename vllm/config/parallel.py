@@ -225,27 +225,19 @@ class ParallelConfig:
     Set to be private as it's not intended to be configured by users.
     """
 
-    _stateless_dp_group_port_list: list[list[int]] = Field(default_factory=list)
-    """List of open ports for stateless DP groups when enable_elastic_ep is True.
-    Set to be private as it's not intended to be configured by users.
-    It is a list of list[int], with each inner list contains a set of 3 ports
-    to be used for setting up the stateless CPU/device/TCPStore groups
-    in StatelessGroupCoordinator. The number of inner lists is equal to
-    the number of DP groups, 
-    i.e., len(self._stateless_dp_group_port_list) == world_size_across_dp // dp_size,
-    and len(self._stateless_dp_group_port_list[i]) == 3 for all i.
-    """
-
-    _stateless_ep_group_port_list: list[list[int]] = Field(default_factory=list)
-    """List of open ports for stateless EP groups when enable_elastic_ep is True.
-    Set to be private as it's not intended to be configured by users.
-    len(self._stateless_ep_group_port_list) == world_size_across_dp // ep_size,
-    """
-
-    _stateless_world_group_port_list: list[list[int]] = Field(default_factory=list)
+    _stateless_world_group_port_list: list[int] = field(default_factory=list)
     """List of open ports for stateless world group when enable_elastic_ep is True.
     Set to be private as it's not intended to be configured by users.
-    len(self._stateless_world_group_port_list) == 1,
+    """
+
+    _stateless_dp_group_port_list: list[int] = field(default_factory=list)
+    """List of open ports for stateless DP groups when enable_elastic_ep is True.
+    Set to be private as it's not intended to be configured by users.
+    """
+
+    _stateless_ep_group_port_list: list[int] = field(default_factory=list)
+    """List of open ports for stateless EP groups when enable_elastic_ep is True.
+    Set to be private as it's not intended to be configured by users.
     """
 
     decode_context_parallel_size: int = 1
@@ -341,13 +333,13 @@ class ParallelConfig:
         return answer
 
     def get_next_stateless_world_group_port(self) -> list[int]:
-        return self._stateless_world_group_port_list.pop()
+        return self._stateless_world_group_port_list.pop(0)
 
     def get_next_stateless_dp_group_port(self) -> list[int]:
-        return self._stateless_dp_group_port_list.pop()
+        return self._stateless_dp_group_port_list.pop(0)
 
     def get_next_stateless_ep_group_port(self) -> list[int]:
-        return self._stateless_ep_group_port_list.pop()
+        return self._stateless_ep_group_port_list.pop(0)
 
     def stateless_init_dp_group(self, return_store: bool = False) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
