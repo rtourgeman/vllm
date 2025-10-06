@@ -159,15 +159,13 @@ if TYPE_CHECKING:
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
-    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
-    VLLM_ALL2ALL_BACKEND: Literal[
-        "naive",
-        "pplx",
-        "deepep_high_throughput",
-        "deepep_low_latency",
-        "allgather_reducescatter",
-        "flashinfer_all2allv",
-    ] = "allgather_reducescatter"
+    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
+                                  "deepep_high_throughput",
+                                  "deepep_low_latency",
+                                  "nixl_deepep_low_latency",
+                                  "allgather_reducescatter"] = \
+                                  "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
@@ -1187,19 +1185,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "pplx": use pplx kernels
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
-    # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
-    "VLLM_ALL2ALL_BACKEND": env_with_choices(
-        "VLLM_ALL2ALL_BACKEND",
-        "allgather_reducescatter",
-        [
-            "naive",
-            "pplx",
-            "deepep_high_throughput",
-            "deepep_low_latency",
-            "allgather_reducescatter",
-            "flashinfer_all2allv",
-        ],
-    ),
+    "VLLM_ALL2ALL_BACKEND":
+    env_with_choices("VLLM_ALL2ALL_BACKEND", "allgather_reducescatter",
+                     ["naive", "pplx",
+                     "deepep_high_throughput",
+                     "deepep_low_latency",
+                     "nixl_deepep_low_latency",
+                     "allgather_reducescatter"]),
+
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
     # Available options:
@@ -1448,6 +1441,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
         int(os.getenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0"))
     ),
+    # NOTE(yongji): NIXL EP env variables
+    # temporarily register here for Ray to pass to downstream EngineCore actors
+    "NIXL_DEEPEP_MAX_NUM_RANKS":
+    lambda: int(os.getenv("NIXL_DEEPEP_MAX_NUM_RANKS", None)),
+    "NIXL_ETCD_ENDPOINTS":
+    lambda: os.getenv("NIXL_ETCD_ENDPOINTS", None),
+    "NIXL_UCX_IB_DEVICES":
+    lambda: os.getenv("NIXL_UCX_IB_DEVICES", None),
+    "NIXL_UCX_TCP_DEVICES":
+    lambda: os.getenv("NIXL_UCX_TCP_DEVICES", None),
 }
 
 # --8<-- [end:env-vars-definition]

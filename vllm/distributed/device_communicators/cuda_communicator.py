@@ -128,16 +128,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 )
             elif self.all2all_backend == "deepep_low_latency":
                 from .all2all import DeepEPLLAll2AllManager
-
-                self.all2all_manager = DeepEPLLAll2AllManager(
-                    self.cpu_group, tcp_store_group
-                )
-            elif self.all2all_backend == "flashinfer_all2allv":
-                from .all2all import FlashInferAllToAllManager
-
-                self.all2all_manager = FlashInferAllToAllManager(
-                    self.cpu_group, tcp_store_group
-                )
+                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group, tcp_store_group=tcp_store_group)
+                logger.info("Using DeepEP Low-Latency all2all manager.")
+            elif all2all_backend == "nixl_deepep_low_latency":
+                from .all2all import NIXLDeepEPLLAll2AllManager
+                self.all2all_manager = NIXLDeepEPLLAll2AllManager(self.cpu_group, tcp_store_group=tcp_store_group)
+                logger.info("Using NIXL DeepEP Low-Latency all2all manager.")
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 
