@@ -455,13 +455,15 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
         )
 
-        print(f"num_ranks: {max_num_ep_ranks}, num_experts_per_rank: {num_experts_per_rank}, num_nvl_bytes: {num_nvl_bytes}, num_rdma_bytes: {num_rdma_bytes}")
+        print(f"max_num_tokens_per_dp_rank: {max_num_tokens_per_dp_rank}, token_hidden_size: {token_hidden_size}, max_num_ep_ranks: {max_num_ep_ranks}, num_experts_per_rank: {num_experts_per_rank}, num_nvl_bytes: {num_nvl_bytes}, num_rdma_bytes: {num_rdma_bytes}")
 
         NIXLDeepEPLLAll2AllManager._persistent_buffer = buffer
         ranks_to_connect = list(range(self.cpu_group.size()))
         buffer.connect_ranks(ranks_to_connect)
         NIXLDeepEPLLAll2AllManager._current_ep_size = self.cpu_group.size()
         NIXLDeepEPLLAll2AllManager._ep_group_changed = False
+
+        print(f"Connected to ranks: {ranks_to_connect}")
 
     def _update_buffer(self):
         buffer = NIXLDeepEPLLAll2AllManager._persistent_buffer
