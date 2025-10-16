@@ -488,7 +488,7 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
         #   max_num_tokens_per_dp_rank, token_hidden_size, 
         #   num_ep_ranks, num_global_experts, num_local_experts
         print(f"kwargs: {kwargs}")
-        num_experts_per_rank = kwargs['num_global_experts'] // kwargs['num_local_experts']
+        num_experts_per_rank = kwargs['num_global_experts'] // kwargs['num_ep_ranks']
         nixl_kwargs = dict(
             max_num_tokens_per_dp_rank=kwargs['max_num_tokens_per_dp_rank'],
             token_hidden_size=kwargs['token_hidden_size'],
