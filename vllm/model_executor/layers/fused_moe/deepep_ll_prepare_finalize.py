@@ -200,15 +200,15 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
-        expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
-            a1,
-            topk_ids,
-            self.max_tokens_per_rank,
-            num_experts,
-            use_fp8=self.use_fp8_dispatch,
-            async_finish=False,
-            return_recv_hook=True,
-        )
+        print(f"Dispatching with max_tokens_per_rank: {self.max_tokens_per_rank}, num_experts: {num_experts}, use_fp8_dispatch: {self.use_fp8_dispatch}")
+        expert_x, expert_num_tokens, handle, _, hook= \
+                self.buffer.low_latency_dispatch(a1,
+                                                topk_ids,
+                                                self.max_tokens_per_rank,
+                                                num_experts,
+                                                use_fp8=self.use_fp8_dispatch,
+                                                async_finish=False,
+                                                return_recv_hook=True)
         self.handles[a2a_idx] = handle
 
         return (
