@@ -487,11 +487,10 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
             token_hidden_size=kwargs['token_hidden_size'],
             num_experts_per_rank=num_experts_per_rank,
         )
-        # kwargs = nixl_kwargs
         
-        buffer_kwargs = sorted((k, v) for k, v in kwargs.items())
+        buffer_kwargs = sorted((k, v) for k, v in nixl_kwargs.items())
         if NIXLDeepEPLLAll2AllManager._persistent_buffer is None:
-            self._init_buffer(**kwargs)
+            self._init_buffer(**nixl_kwargs)
             NIXLDeepEPLLAll2AllManager._buffer_kwargs = buffer_kwargs
         else:
             assert NIXLDeepEPLLAll2AllManager._buffer_kwargs == buffer_kwargs, "NIXL EP buffer kwargs changed"
