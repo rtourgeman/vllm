@@ -421,6 +421,7 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
         local_device_index = int(cuda_visible_devices[get_tp_group().rank_in_group])
         pxb_ib_nic = ucx_ib_nics[local_device_index]
         os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_ib_nic}' + ',' + os.environ['NIXL_UCX_TCP_DEVICES']
+        print(f"NIXL UCX NET DEVICES: {os.environ['UCX_NET_DEVICES']}")
 
     def _init_buffer(
         self,
@@ -453,6 +454,9 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
             num_nvl_bytes=num_nvl_bytes,
             num_rdma_bytes=num_rdma_bytes,
         )
+
+        print(f"num_ranks: {max_num_ep_ranks}, num_experts_per_rank: {num_experts_per_rank}, num_nvl_bytes: {num_nvl_bytes}, num_rdma_bytes: {num_rdma_bytes}")
+
         NIXLDeepEPLLAll2AllManager._persistent_buffer = buffer
         ranks_to_connect = list(range(self.cpu_group.size()))
         buffer.connect_ranks(ranks_to_connect)
@@ -487,7 +491,7 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
             token_hidden_size=kwargs['token_hidden_size'],
             num_experts_per_rank=num_experts_per_rank,
         )
-        
+
         buffer_kwargs = sorted((k, v) for k, v in nixl_kwargs.items())
         if NIXLDeepEPLLAll2AllManager._persistent_buffer is None:
             self._init_buffer(**nixl_kwargs)
