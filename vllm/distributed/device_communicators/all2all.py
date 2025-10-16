@@ -487,13 +487,14 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
         # NOTE(yongji): kwargs passed by FusedMoEMethodBase is the same as DeepEPLL, which contains:
         #   max_num_tokens_per_dp_rank, token_hidden_size, 
         #   num_ep_ranks, num_global_experts, num_local_experts
+        print(f"kwargs: {kwargs}")
         num_experts_per_rank = kwargs['num_global_experts'] // kwargs['num_local_experts']
         nixl_kwargs = dict(
             max_num_tokens_per_dp_rank=kwargs['max_num_tokens_per_dp_rank'],
             token_hidden_size=kwargs['token_hidden_size'],
             num_experts_per_rank=num_experts_per_rank,
         )
-
+        print(f"nixl_kwargs: {nixl_kwargs}")
         buffer_kwargs = sorted((k, v) for k, v in nixl_kwargs.items())
         if NIXLDeepEPLLAll2AllManager._persistent_buffer is None:
             self._init_buffer(**nixl_kwargs)
