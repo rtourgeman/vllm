@@ -420,7 +420,7 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
         assert get_pp_group().world_size == 1
         local_device_index = int(cuda_visible_devices[get_tp_group().rank_in_group])
         pxb_ib_nic = ucx_ib_nics[local_device_index]
-        os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_ib_nic}' + ',' + os.environ['NIXL_UCX_TCP_DEVICES']
+        os.environ['UCX_NET_DEVICES'] = f'cuda{local_device_index}-{pxb_ib_nic}' + ',' + os.environ['NIXL_UCX_TCP_DEVICES']
         print(f"NIXL UCX NET DEVICES: {os.environ['UCX_NET_DEVICES']}")
 
     def _init_buffer(
