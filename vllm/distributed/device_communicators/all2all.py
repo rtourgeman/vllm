@@ -446,7 +446,6 @@ class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
             low_latency_mode=True,
             explicitly_destroy=True,
             low_latency_nvlink_backend='ipc',
-            allow_mnnvl=True,
         )
         buffer.update_memory_buffers(
             num_ranks=max_num_ep_ranks,

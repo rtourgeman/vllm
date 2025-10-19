@@ -32,6 +32,7 @@ export NIXL_ETCD_ENDPOINTS="http://10.52.49.234:2379"
 export NIXL_DEEPEP_MAX_NUM_RANKS=8
 export NIXL_UCX_IB_DEVICES="mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11"
 export NIXL_UCX_TCP_DEVICES="ibp154s0,ibp192s0,ibp206s0,ibp220s0,ibp94s0"
+export UCX_CUDA_COPY_DMABUF=n
 
 # Launch the vLLM server
 vllm serve $MODEL_NAME --trust-remote-code \
