@@ -366,6 +366,25 @@ class EplbState:
                     max_tokens,
                     balancedness,
                 )
+                
+                # Per-expert and per-rank breakdown
+                for layer_idx in range(total_expert_load_pass.shape[0]):
+                    expert_tokens = total_expert_load_pass[layer_idx].cpu().tolist()
+                    logger.info(f"[EPLB DEBUG] Layer {layer_idx} expert distribution:")
+                    
+                    # Assume experts are evenly distributed across ranks
+                    num_experts_per_rank = len(expert_tokens) // ep_group.size()
+                    
+                    for rank_idx in range(ep_group.size()):
+                        start_idx = rank_idx * num_experts_per_rank
+                        end_idx = start_idx + num_experts_per_rank
+                        rank_expert_tokens = expert_tokens[start_idx:end_idx]
+                        rank_total = sum(rank_expert_tokens)
+                        
+                        logger.info(
+                            f"[EPLB DEBUG]   Rank {rank_idx} experts [{start_idx}:{end_idx}]: "
+                            f"{rank_expert_tokens} → total={rank_total}"
+                        )
 
         # Update the expert load sliding window
         if not is_dummy:
