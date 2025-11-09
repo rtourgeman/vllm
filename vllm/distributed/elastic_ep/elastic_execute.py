@@ -157,10 +157,12 @@ class ElasticEPScalingExecutor:
                 dp_group_ports=reconfig_request.new_stateless_dp_group_port_list,
                 ep_group_ports=reconfig_request.new_stateless_ep_group_port_list,
             )
-        self.worker.model_runner.eplb_disabled = True
-        standby_ep_group = get_standby_ep_group()
-        assert standby_ep_group is not None
-        if standby_ep_group.rank == 0:
+        self.worker.model_runner.eplb_disabled = False
+        logger.info(
+            f"[EPLB DEBUG] Set eplb_disabled=True during scale-up "
+            f"(EP rank={get_standby_ep_group().rank}, DP rank={get_standby_dp_group().rank_in_group})"
+        )
+        if get_standby_ep_group().rank == 0:
             logger.info("[Elastic EP] EPLB disabled during elastic scaling transition")
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
@@ -411,6 +413,10 @@ class ElasticEPScalingExecutor:
         # reset expert_rearrangement_step to ensure all ranks are synchronized
         self.worker.model_runner.eplb_state.expert_rearrangement_step = 0
         self.worker.model_runner.eplb_disabled = False
+        logger.info(
+            f"[EPLB DEBUG] Set eplb_disabled=False after resharding "
+            f"(EP rank={get_ep_group().rank}, DP rank={get_dp_group().rank_in_group})"
+        )
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 

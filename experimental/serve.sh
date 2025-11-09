@@ -6,9 +6,10 @@ MODEL_NAME="Qwen/Qwen3-30B-A3B-Thinking-2507-FP8"
 HOST="0.0.0.0"
 PORT=8006
 
-DATA_PARALLEL_SIZE=2
-DATA_PARALLEL_SIZE_LOCAL=2
-LEADER_ADDRESS="10.52.49.234"
+DATA_PARALLEL_SIZE=4
+DATA_PARALLEL_SIZE_LOCAL=4
+LEADER_ADDRESS=$(hostname -I | awk '{print $1}')
+# LEADER_ADDRESS="10.52.48.99"
 # LEADER_ADDRESS="172.18.0.3"
 
 NUM_REDUNDANT_EXPERTS=16
@@ -28,7 +29,8 @@ export VLLM_USE_DEEP_GEMM=1
 # export VLLM_ATTENTION_BACKEND="TRITON_MLA"
 
 # NIXL DeepEP env variables
-export NIXL_ETCD_ENDPOINTS="http://10.52.49.234:2379"
+export MASTER_ADDR=$(hostname -i)
+export NIXL_ETCD_ENDPOINTS=http://$MASTER_ADDR:2379
 export NIXL_DEEPEP_MAX_NUM_RANKS=8
 export NIXL_UCX_IB_DEVICES="mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11"
 export NIXL_UCX_TCP_DEVICES="ibp154s0,ibp192s0,ibp206s0,ibp220s0,ibp94s0"
@@ -49,6 +51,7 @@ vllm serve $MODEL_NAME --trust-remote-code \
     --eplb-config.num_redundant_experts $NUM_REDUNDANT_EXPERTS \
     --eplb-config.window_size $EPLB_WINDOW_SIZE \
     --eplb-config.step_interval $EPLB_STEP_INTERVAL \
+    --eplb-config.log_balancedness true \
     --data-parallel-backend ray \
     --data-parallel-size $DATA_PARALLEL_SIZE \
     --data-parallel-size-local $DATA_PARALLEL_SIZE_LOCAL \

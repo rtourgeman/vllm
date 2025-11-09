@@ -35,6 +35,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
+<<<<<<< HEAD
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -42,6 +43,12 @@ from vllm.distributed.parallel_state import (
     prepare_communication_buffer_for_model,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
+=======
+    get_ep_group, get_pp_group, get_tp_group, graph_capture,
+    is_global_first_rank, prepare_communication_buffer_for_model)
+from vllm.forward_context import (BatchDescriptor, DPMetadata,
+                                  set_forward_context)
+>>>>>>> ad9456b5c (ron debug)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
