@@ -51,7 +51,6 @@ vllm serve $MODEL_NAME --trust-remote-code \
     --eplb-config.num_redundant_experts $NUM_REDUNDANT_EXPERTS \
     --eplb-config.window_size $EPLB_WINDOW_SIZE \
     --eplb-config.step_interval $EPLB_STEP_INTERVAL \
-    --eplb-config.log_balancedness true \
     --data-parallel-backend ray \
     --data-parallel-size $DATA_PARALLEL_SIZE \
     --data-parallel-size-local $DATA_PARALLEL_SIZE_LOCAL \
