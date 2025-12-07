@@ -522,29 +522,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         import os
 
         self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
-        assert envs.VLLM_NIXL_EP_UCX_IB_DEVICES is not None, (
-            "VLLM_NIXL_EP_UCX_IB_DEVICES is not set"
-        )
-        assert envs.VLLM_NIXL_EP_UCX_TCP_DEVICES is not None, (
-            "VLLM_NIXL_EP_UCX_TCP_DEVICES is not set"
-        )
-        if envs.VLLM_NIXL_EP_ETCD_ENDPOINTS is not None:
-            os.environ["NIXL_ETCD_ENDPOINTS"] = envs.VLLM_NIXL_EP_ETCD_ENDPOINTS
         if envs.VLLM_NIXL_EP_PLUGIN_DIR is not None:
             os.environ["NIXL_PLUGIN_DIR"] = envs.VLLM_NIXL_EP_PLUGIN_DIR
-
-        from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-
-        # NOTE(yongji): envs.LOCAL_RANK may not be set
-        # an ugly way to get current worker's device index under DPEngineCoreActor
-        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES.split(",")
-        assert get_pp_group().world_size == 1
-        local_device_index = int(cuda_visible_devices[get_tp_group().rank_in_group])
-        ucx_ib_nics = envs.VLLM_NIXL_EP_UCX_IB_DEVICES.split(",")
-        pxb_ib_nic = ucx_ib_nics[local_device_index]
-        os.environ["UCX_NET_DEVICES"] = (
-            f"cuda0-{pxb_ib_nic}:1" + "," + envs.VLLM_NIXL_EP_UCX_TCP_DEVICES
-        )
 
     def _init_buffer(
         self,
@@ -565,10 +544,9 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             "NIXL EP buffer already initialized"
         )
         buffer = Buffer(
-            nvlink_backend="nixl",
             explicitly_destroy=True,
             rank=self.rank,
-            enable_shrink=True,
+            tcp_store_group=self.tcp_store_group.store,
         )
         buffer.update_memory_buffers(
             num_ranks=self.max_num_ep_ranks,
@@ -584,12 +562,14 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         buffer, current_ep_size = NixlEPAll2AllManager._buffer
         current_ranks = list(range(current_ep_size))
         new_ep_size = self.cpu_group.size()
+        buffer.set_tcp_store_group(self.tcp_store_group.store)
         if new_ep_size > len(current_ranks):
             ranks_to_connect = list(range(len(current_ranks), new_ep_size))
             buffer.connect_ranks(ranks_to_connect)
         else:
             ranks_to_disconnect = current_ranks[new_ep_size:]
             buffer.disconnect_ranks(ranks_to_disconnect)
+        NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
 
     def get_handle(self, kwargs):
         if (
@@ -629,7 +609,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     def destroy(self):
         # NOTE(yongji): NIXLEPAll2AllManager instance is recreated during
         # scale-up/down, so we cannot destroy the persistent buffer here.
-        pass
+        buffer = NixlEPAll2AllManager._buffer[0]
+        buffer.set_tcp_store_group(None)
 
     # NIXL EP uses RDMA so no SMs are used for communication
     def max_sms_used(self) -> int | None:
