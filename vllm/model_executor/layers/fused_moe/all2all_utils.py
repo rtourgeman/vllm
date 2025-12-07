@@ -31,7 +31,10 @@ if current_platform.is_cuda_alike():
             DeepEPLLPrepareAndFinalize,
         )
     if has_nixl_ep():
-        from .nixl_ep_prepare_finalize import NixlEPPrepareAndFinalize
+        from .nixl_ep_prepare_finalize import (
+            NIXL_EP_QUANT_BLOCK_SHAPE,
+            NixlEPPrepareAndFinalize,
+        )
 
 
 def maybe_roundup_layer_hidden_size(
@@ -197,7 +200,7 @@ def maybe_make_prepare_finalize(
         # data movement.
         use_fp8_dispatch = (
             quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
+            and quant_config.block_shape == NIXL_EP_QUANT_BLOCK_SHAPE
         )
 
         prepare_finalize = NixlEPPrepareAndFinalize(
