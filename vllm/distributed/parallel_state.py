@@ -58,6 +58,7 @@ from vllm.utils.torch_utils import (
 
 if TYPE_CHECKING:
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+    from vllm.distributed.device_communicators.nixl.group_manager import NixlGroupManager
 
 
 @dataclass
@@ -1122,6 +1123,20 @@ def get_ep_group() -> "GroupCoordinator | StatelessGroupCoordinator":
     return _EP
 
 
+_EP_ELASTIC: "NixlGroupManager | None" = None
+
+
+def get_ep_elastic_manager() -> "NixlGroupManager | None":
+    return _EP_ELASTIC
+
+
+_DP_ELASTIC: "NixlGroupManager | None" = None
+
+
+def get_dp_elastic_manager() -> "NixlGroupManager | None":
+    return _DP_ELASTIC
+
+
 _PCP: GroupCoordinator | None = None
 
 
@@ -1552,6 +1567,34 @@ def initialize_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dp"
         )
 
+    global _DP_ELASTIC
+    if enable_elastic_ep and _DP.world_size > 1:
+        if _DP_ELASTIC is not None:
+            logger.warning(
+                f"[NIXL] _DP_ELASTIC already exists when initializing DP group! "
+                f"This should not happen. agent_name={_DP_ELASTIC.agent_name}"
+            )
+            _DP_ELASTIC = None
+        
+        from vllm.distributed.device_communicators.nixl.group_manager import NixlGroupManager
+        logger.info(
+            f"[NIXL] Creating DP elastic manager: "
+            f"rank_in_group={_DP.rank_in_group}, world_size={_DP.world_size}"
+        )
+        _DP_ELASTIC = NixlGroupManager(
+            rank=_DP.rank_in_group,
+            group_prefix="dp"
+        )
+        logger.info(
+            f"[NIXL] Updating peers for DP elastic manager: "
+            f"my_rank={_DP.rank_in_group}, world_size={_DP.world_size}"
+        )
+        _DP_ELASTIC.update_peers(
+            comm_group=_DP.tcp_store_group,
+            my_rank_in_group=_DP.rank_in_group,
+            peer_ranks=list(range(_DP.world_size))
+        )
+
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
     group_ranks = (
@@ -1586,6 +1629,34 @@ def initialize_model_parallel(
     else:
         _EP = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="ep"
+        )
+    
+    global _EP_ELASTIC
+    if enable_elastic_ep and _EP.world_size > 1:
+        if _EP_ELASTIC is not None:
+            logger.warning(
+                f"[NIXL] _EP_ELASTIC already exists when initializing EP group! "
+                f"This should not happen. agent_name={_EP_ELASTIC.agent_name}"
+            )
+            _EP_ELASTIC = None
+        
+        from vllm.distributed.device_communicators.nixl.group_manager import NixlGroupManager
+        logger.info(
+            f"[NIXL] Creating EP elastic manager: "
+            f"rank_in_group={_EP.rank_in_group}, world_size={_EP.world_size}"
+        )
+        _EP_ELASTIC = NixlGroupManager(
+            rank=_EP.rank_in_group,
+            group_prefix="ep"
+        )
+        logger.info(
+            f"[NIXL] Updating peers for EP elastic manager: "
+            f"my_rank={_EP.rank_in_group}, world_size={_EP.world_size}"
+        )
+        _EP_ELASTIC.update_peers(
+            comm_group=_EP.tcp_store_group,
+            my_rank_in_group=_EP.rank_in_group,
+            peer_ranks=list(range(_EP.world_size))
         )
 
     logger.info_once(
@@ -1703,6 +1774,25 @@ def create_standby_groups(
         global_world_size=new_world_size_across_dp,
     )
 
+    global _DP_ELASTIC
+
+    if _DP_ELASTIC is not None and _STANDBY_DP.world_size > 1:
+        logger.info(
+            f"[NIXL] create_standby_groups: Updating DP elastic manager peers - "
+            f"agent_name={_DP_ELASTIC.agent_name}, "
+            f"standby DP world_size={_STANDBY_DP.world_size}, "
+            f"standby rank_in_group={_STANDBY_DP.rank_in_group}"
+        )
+        _DP_ELASTIC.update_peers(
+            comm_group=_STANDBY_DP.tcp_store_group,
+            my_rank_in_group=_STANDBY_DP.rank_in_group,
+            peer_ranks=list(range(_STANDBY_DP.world_size))
+        )
+        logger.info(
+            f"[NIXL] create_standby_groups: DP elastic manager peers updated - "
+            f"total known peers={len(_DP_ELASTIC.known_peers)}"
+        )
+
     standby_ep_ranks = (
         all_ranks.transpose(1, 2).reshape(-1, new_dp_size * tp_size).unbind(0)
     )
@@ -1718,6 +1808,27 @@ def create_standby_groups(
         global_rank=global_rank,
         global_world_size=new_world_size_across_dp,
     )
+    
+    global _EP_ELASTIC
+    
+    if _EP_ELASTIC is not None and _STANDBY_EP.world_size > 1:
+        logger.info(
+            f"[NIXL] create_standby_groups: Updating EP elastic manager peers - "
+            f"agent_name={_EP_ELASTIC.agent_name}, "
+            f"standby EP world_size={_STANDBY_EP.world_size}, "
+            f"standby rank_in_group={_STANDBY_EP.rank_in_group}"
+        )
+
+        _EP_ELASTIC.update_peers(
+            comm_group=_STANDBY_EP.tcp_store_group,
+            my_rank_in_group=_STANDBY_EP.rank_in_group,
+            peer_ranks=list(range(_STANDBY_EP.world_size))
+        )
+        
+        logger.info(
+            f"[NIXL] create_standby_groups: EP elastic manager peers updated - "
+            f"total known peers={len(_EP_ELASTIC.known_peers)}"
+        )
 
 
 def switch_to_standby_groups() -> None:
@@ -1845,10 +1956,28 @@ def destroy_model_parallel():
         _DP.destroy()
     _DP = None
 
+    global _DP_ELASTIC
+    if _DP_ELASTIC:
+        logger.info(
+            f"[NIXL] destroy_model_parallel: Cleaning up DP elastic manager: "
+            f"agent_name={_DP_ELASTIC.agent_name}"
+        )
+        _DP_ELASTIC = None
+        logger.info("[NIXL] destroy_model_parallel: DP elastic manager cleaned up")
+
     global _EP
     if _EP:
         _EP.destroy()
     _EP = None
+
+    global _EP_ELASTIC
+    if _EP_ELASTIC:
+        logger.info(
+            f"[NIXL] destroy_model_parallel: Cleaning up EP elastic manager: "
+            f"agent_name={_EP_ELASTIC.agent_name}"
+        )
+        _EP_ELASTIC = None
+        logger.info("[NIXL] destroy_model_parallel: EP elastic manager cleaned up")
 
 
 def destroy_distributed_environment():

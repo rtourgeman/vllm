@@ -26,6 +26,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import (
     create_standby_groups,
+    get_dp_elastic_manager,
     prepare_communication_buffer_for_model,
     switch_to_standby_groups,
 )
@@ -77,7 +78,20 @@ def batch_transfer_weights(
             op.tensor = param
         op.group_peer = peer_rank
         p2p_ops.append(op)
-    device_comm.batch_isend_irecv(p2p_ops)
+    
+    dp_elastic_manager = get_dp_elastic_manager()
+    if dp_elastic_manager is not None:
+        # Register buffers and sync metadata before transfer
+        dp_elastic_manager.register_memory(all_params)
+        dp_group = get_dp_group()
+        dp_elastic_manager.sync_metadata(
+            comm_group=dp_group.tcp_store_group,
+            my_rank_in_group=dp_group.rank_in_group,
+            peer_ranks=list(range(dp_group.world_size))
+        )
+        dp_elastic_manager.batch_isend_irecv(p2p_ops)
+    else:
+        device_comm.batch_isend_irecv(p2p_ops)
 
 
 def broadcast_expert_mapping(

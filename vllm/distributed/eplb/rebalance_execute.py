@@ -18,7 +18,7 @@ from torch.distributed import (
     get_global_rank,
 )
 
-from vllm.distributed.parallel_state import get_ep_group
+from vllm.distributed.parallel_state import get_ep_group, get_ep_elastic_manager
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
@@ -148,6 +148,15 @@ def move_to_buffer(
     if isinstance(get_ep_group(), StatelessGroupCoordinator):
         ep_group = get_ep_group()
         is_stateless = True
+        # Register buffers and sync metadata before transfer
+        ep_elastic_manager = get_ep_elastic_manager()
+        all_buffers = list(expert_weights) + list(expert_weights_buffer)
+        ep_elastic_manager.register_memory(all_buffers)
+        ep_elastic_manager.sync_metadata(
+            comm_group=ep_group.tcp_store_group,
+            my_rank_in_group=ep_group.rank_in_group,
+            peer_ranks=list(range(ep_group.world_size))
+        )
     else:
         is_stateless = False
 
@@ -254,14 +263,14 @@ def move_to_buffer(
     if p2p_ops and cuda_stream is not None:
         with torch.cuda.stream(cuda_stream):
             if is_stateless:
-                ep_group.device_communicator.batch_isend_irecv(p2p_ops)
+                get_ep_elastic_manager().batch_isend_irecv(p2p_ops)
             else:
                 reqs = batch_isend_irecv(p2p_ops)
                 for req in reqs:
                     req.wait()
     elif p2p_ops:
         if is_stateless:
-            ep_group.device_communicator.batch_isend_irecv(p2p_ops)
+            get_ep_elastic_manager().batch_isend_irecv(p2p_ops)
         else:
             reqs = batch_isend_irecv(p2p_ops)
             for req in reqs:
