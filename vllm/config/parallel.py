@@ -42,6 +42,7 @@ All2AllBackend = Literal[
     "deepep_high_throughput",
     "deepep_low_latency",
     "mori",
+    "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",
 ]
