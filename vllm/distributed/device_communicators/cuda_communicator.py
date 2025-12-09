@@ -32,6 +32,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         global_ranks: list[int] | None = None,
         global_world_size: int | None = None,
         tcp_store_group: StatelessProcessGroup | None = None,
+        use_pynccl_comm: bool = True,
     ):
         super().__init__(
             cpu_group,
@@ -53,6 +54,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
+        self.tcp_store_group = tcp_store_group
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -65,7 +67,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
         self.pynccl_comm: PyNcclCommunicator | None = None
-        if self.world_size > 1:
+        if use_pynccl_comm and self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group if tcp_store_group is None else tcp_store_group,
                 device=self.device,
@@ -205,7 +207,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().reduce_scatter(input_, dim)
+
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -224,7 +228,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         pynccl_comm.reduce_scatter(output, input_tensor)
 
-        # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
     def reduce_scatterv(
@@ -299,8 +302,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if pynccl_comm is not None and not pynccl_comm.disabled:
             pynccl_comm.broadcast(tensor, src)
             return tensor
+        elif self.tcp_store_group is not None:
+            return self.tcp_store_group.broadcast(tensor, src)
         else:
-            raise ValueError("No PyNCCL communicator found")
+            return super().broadcast(tensor, src)
 
     def destroy(self):
         if self.pynccl_comm is not None:

@@ -132,6 +132,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                 global_ranks=self.ranks,
                 global_world_size=global_world_size,
                 tcp_store_group=self.tcp_store_group,
+                use_pynccl_comm=False,
             )
 
         self.mq_broadcaster = None
