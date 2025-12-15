@@ -429,8 +429,6 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert envs.VLLM_NIXL_EP_UCX_TCP_DEVICES is not None, (
             "VLLM_NIXL_EP_UCX_TCP_DEVICES is not set"
         )
-        if envs.VLLM_NIXL_EP_ETCD_ENDPOINTS is not None:
-            os.environ["NIXL_ETCD_ENDPOINTS"] = envs.VLLM_NIXL_EP_ETCD_ENDPOINTS
         if envs.VLLM_NIXL_EP_PLUGIN_DIR is not None:
             os.environ["NIXL_PLUGIN_DIR"] = envs.VLLM_NIXL_EP_PLUGIN_DIR
 
@@ -470,6 +468,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             explicitly_destroy=True,
             rank=self.rank,
             enable_shrink=True,
+            tcp_store_group=self.tcp_store_group.store,
         )
         buffer.update_memory_buffers(
             num_ranks=self.max_num_ep_ranks,
@@ -485,6 +484,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         buffer, current_ep_size = NixlEPAll2AllManager._buffer
         current_ranks = list(range(current_ep_size))
         new_ep_size = self.cpu_group.size()
+        buffer.set_tcp_store_group(self.tcp_store_group.store)
         if new_ep_size > len(current_ranks):
             ranks_to_connect = list(range(len(current_ranks), new_ep_size))
             buffer.connect_ranks(ranks_to_connect)
@@ -532,7 +532,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     def destroy(self):
         # NOTE(yongji): NIXLEPAll2AllManager instance is recreated during
         # scale-up/down, so we cannot destroy the persistent buffer here.
-        pass
+        buffer = NixlEPAll2AllManager._buffer[0]
+        buffer.set_tcp_store_group(None)
 
     # NIXL EP uses RDMA so no SMs are used for communication
     def max_sms_used(self) -> int | None:
