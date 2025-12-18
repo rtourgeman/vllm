@@ -492,6 +492,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             ranks_to_disconnect = current_ranks[new_ep_size:]
             buffer.disconnect_ranks(ranks_to_disconnect)
 
+        NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
+
     def get_handle(self, kwargs):
         if (
             NixlEPAll2AllManager._buffer is not None
