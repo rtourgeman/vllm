@@ -250,8 +250,6 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 128
-    VLLM_NIXL_EP_UCX_IB_DEVICES: str | None = None
-    VLLM_NIXL_EP_UCX_TCP_DEVICES: str | None = None
     VLLM_NIXL_EP_PLUGIN_DIR: str | None = None
 
 
@@ -1600,12 +1598,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # EngineCore actors
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "128")
-    ),
-    "VLLM_NIXL_EP_UCX_IB_DEVICES": lambda: os.getenv(
-        "VLLM_NIXL_EP_UCX_IB_DEVICES", None
-    ),
-    "VLLM_NIXL_EP_UCX_TCP_DEVICES": lambda: os.getenv(
-        "VLLM_NIXL_EP_UCX_TCP_DEVICES", None
     ),
     "VLLM_NIXL_EP_PLUGIN_DIR": lambda: os.getenv("VLLM_NIXL_EP_PLUGIN_DIR", None),
 }

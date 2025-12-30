@@ -423,27 +423,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         import os
 
         self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
-        assert envs.VLLM_NIXL_EP_UCX_IB_DEVICES is not None, (
-            "VLLM_NIXL_EP_UCX_IB_DEVICES is not set"
-        )
-        assert envs.VLLM_NIXL_EP_UCX_TCP_DEVICES is not None, (
-            "VLLM_NIXL_EP_UCX_TCP_DEVICES is not set"
-        )
         if envs.VLLM_NIXL_EP_PLUGIN_DIR is not None:
             os.environ["NIXL_PLUGIN_DIR"] = envs.VLLM_NIXL_EP_PLUGIN_DIR
-
-        from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-
-        # NOTE(yongji): envs.LOCAL_RANK may not be set
-        # an ugly way to get current worker's device index under DPEngineCoreActor
-        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES.split(",")
-        assert get_pp_group().world_size == 1
-        local_device_index = int(cuda_visible_devices[get_tp_group().rank_in_group])
-        ucx_ib_nics = envs.VLLM_NIXL_EP_UCX_IB_DEVICES.split(",")
-        pxb_ib_nic = ucx_ib_nics[local_device_index]
-        os.environ["UCX_NET_DEVICES"] = (
-            f"cuda0-{pxb_ib_nic}:1" + "," + envs.VLLM_NIXL_EP_UCX_TCP_DEVICES
-        )
 
     def _init_buffer(
         self,
