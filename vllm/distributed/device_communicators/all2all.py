@@ -415,8 +415,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     This backend supports elastic EP with dynamic rank connection/disconnection.
     """
 
-    # (nixl_ep_buffer, ep_size)
-    _buffer: tuple[Any, int] | None = None
+    # (nixl_ep_buffer, ep_size, num_experts_per_rank)
+    _buffer: tuple[Any, int, int] | None = None
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
@@ -456,31 +456,64 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         )
         ranks_to_connect = list(range(self.cpu_group.size()))
         buffer.connect_ranks(ranks_to_connect)
-        NixlEPAll2AllManager._buffer = (buffer, self.cpu_group.size())
+        NixlEPAll2AllManager._buffer = (buffer, self.cpu_group.size(), num_experts_per_rank)
 
-    def _update_buffer(self):
+    def _update_buffer(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_experts_per_rank: int,
+    ):
+        from nixl_ep import Buffer  # type: ignore[import-not-found]
+        
         assert NixlEPAll2AllManager._buffer is not None
-        buffer, current_ep_size = NixlEPAll2AllManager._buffer
+        buffer, current_ep_size, current_experts_per_rank = NixlEPAll2AllManager._buffer
         current_ranks = list(range(current_ep_size))
         new_ep_size = self.cpu_group.size()
         buffer.set_tcp_store_group(self.tcp_store_group.store)
         if new_ep_size > len(current_ranks):
             ranks_to_connect = list(range(len(current_ranks), new_ep_size))
             buffer.connect_ranks(ranks_to_connect)
-        else:
+        elif new_ep_size < len(current_ranks):
             ranks_to_disconnect = current_ranks[new_ep_size:]
             buffer.disconnect_ranks(ranks_to_disconnect)
+        
+        # Handle num_experts_per_rank changes (required for scale-down after scale-up)
+        if num_experts_per_rank != current_experts_per_rank:
+            logger.info(
+                "[NixlEPAll2AllManager] Reconfiguring buffer: "
+                "num_experts_per_rank %d -> %d",
+                current_experts_per_rank, num_experts_per_rank,
+            )
+            max_num_global_experts = self.max_num_ep_ranks * num_experts_per_rank
+            num_rdma_bytes = Buffer.get_rdma_size_hint(
+                num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
+                hidden=token_hidden_size,
+                num_ranks=self.max_num_ep_ranks,
+                num_experts=max_num_global_experts,
+            )
+            buffer.update_memory_buffers(
+                num_ranks=self.max_num_ep_ranks,
+                num_experts_per_rank=num_experts_per_rank,
+                num_rdma_bytes=num_rdma_bytes,
+            )
+        
+        # Update cached tuple with new values
+        NixlEPAll2AllManager._buffer = (buffer, new_ep_size, num_experts_per_rank)
 
         NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
 
     def get_handle(self, kwargs):
+        num_experts_per_rank = kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
+        
+        # Check if cached buffer matches current configuration
         if (
             NixlEPAll2AllManager._buffer is not None
             and NixlEPAll2AllManager._buffer[1] == self.cpu_group.size()
+            and NixlEPAll2AllManager._buffer[2] == num_experts_per_rank
         ):
-            return NixlEPAll2AllManager._buffer[0]
-
-        num_experts_per_rank = kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
+                return NixlEPAll2AllManager._buffer[0]
+        
         nixl_kwargs = dict(
             max_num_tokens_per_dp_rank=kwargs["max_num_tokens_per_dp_rank"],
             token_hidden_size=kwargs["token_hidden_size"],
@@ -489,7 +522,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         if NixlEPAll2AllManager._buffer is None:
             self._init_buffer(**nixl_kwargs)
         else:
-            self._update_buffer()
+            self._update_buffer(**nixl_kwargs)
 
         assert NixlEPAll2AllManager._buffer is not None
         handle = NixlEPAll2AllManager._buffer[0]
