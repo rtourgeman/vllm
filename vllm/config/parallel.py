@@ -78,6 +78,24 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
+    num_active_slots: int = Field(default=0, ge=0)
+    """
+    Override the number of active physical expert slots for EPLB.
+    
+    When set to a positive value, EPLB will only use this many slots for
+    rebalancing, even if more tensor slots are allocated. Remaining slots
+    will be marked as inactive (-1 in physical_to_logical_map).
+    
+    This is useful for testing performance with inactive slots, simulating
+    what happens after a scale-up operation.
+    
+    Example: With 8 GPUs and 128 logical + 16 redundant = 144 physical experts,
+    setting this to 144 will create 144 active slots and 144 inactive slots
+    (18 active + 18 inactive per GPU instead of 36 active per GPU).
+    
+    Default 0 means all slots are active (normal behavior).
+    """
+
 
 @config
 @dataclass
