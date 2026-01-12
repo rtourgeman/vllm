@@ -4,6 +4,7 @@ import copy
 import gc
 import weakref
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -87,26 +88,28 @@ def broadcast_expert_mapping(
     physical_to_logical: torch.Tensor | None,
     num_local_physical_experts: int | None,
     num_logical_experts: int | None,
+    num_active_physical_experts: int | None,
     dp_group: StatelessGroupCoordinator,
     device: torch.device,
     src_rank: int = 0,
-) -> tuple[torch.Tensor, int, int]:
+) -> tuple[torch.Tensor, int, int, int]:
     if dp_group.rank_in_group == src_rank:
         assert physical_to_logical is not None
         assert num_local_physical_experts is not None
         assert num_logical_experts is not None
+        assert num_active_physical_experts is not None
         assert physical_to_logical.dtype == torch.int64
         shape_tensor = torch.tensor(
             list(physical_to_logical.shape), dtype=torch.int64, device="cpu"
         )
         metadata_tensor = torch.tensor(
-            [num_local_physical_experts, num_logical_experts],
+            [num_local_physical_experts, num_logical_experts, num_active_physical_experts],
             dtype=torch.int64,
             device="cpu",
         )
     else:
         shape_tensor = torch.empty(2, dtype=torch.int64, device="cpu")
-        metadata_tensor = torch.empty(2, dtype=torch.int64, device="cpu")
+        metadata_tensor = torch.empty(3, dtype=torch.int64, device="cpu")
 
     shape_tensor = dp_group.tcp_store_group.broadcast(shape_tensor, src_rank)
     metadata_tensor = dp_group.tcp_store_group.broadcast(metadata_tensor, src_rank)
@@ -123,8 +126,9 @@ def broadcast_expert_mapping(
     physical_to_logical = dp_group.broadcast(physical_to_logical, src_rank)
     num_local_physical_experts = int(metadata_tensor[0].item())
     num_logical_experts = int(metadata_tensor[1].item())
+    num_active_physical_experts = int(metadata_tensor[2].item())
 
-    return physical_to_logical, num_local_physical_experts, num_logical_experts
+    return physical_to_logical, num_local_physical_experts, num_logical_experts, num_active_physical_experts
 
 
 class ElasticEPScalingExecutor:
@@ -230,10 +234,13 @@ class ElasticEPScalingExecutor:
         num_physical_experts = physical_to_logical.shape[1]
         num_local_physical_experts = num_physical_experts // get_ep_group().world_size
         num_logical_experts = eplb_model_state.logical_replica_count.shape[1]
+        # Pass the actual active slot count (from initial setup), not tensor slot count
+        num_active_physical_experts = eplb_state.num_active_physical_experts
         broadcast_expert_mapping(
             physical_to_logical=physical_to_logical,
             num_local_physical_experts=num_local_physical_experts,
             num_logical_experts=num_logical_experts,
+            num_active_physical_experts=num_active_physical_experts,
             dp_group=standby_dp_group,
             src_rank=0,
             device=self.worker.device,
@@ -283,25 +290,49 @@ class ElasticEPScalingExecutor:
                 or module.__class__.__name__ == "SharedFusedMoE"
             )
         ]
-        num_local_experts = moe_modules[0].moe_config.num_local_experts
-        assert all(
-            module.moe_config.num_local_experts == num_local_experts
-            for module in moe_modules
-        ), "All MoE modules must have the same number of experts"
+        # After scale-up with virtual slot masking, moe_config.num_local_experts
+        # still reflects the pre-scale-up value. The weight tensors have already
+        # been resized, so read the true count from there.
+        model = self.worker.model_runner.get_model()
+        if hasattr(model, 'expert_weights') and len(model.expert_weights) > 0:
+            num_local_experts = model.expert_weights[0][0].size(0)
+        else:
+            num_local_experts = moe_modules[0].moe_config.num_local_experts
+
+        tp_size = get_tp_group().world_size
+        ep_size = get_ep_group().world_size
+        ep_rank = get_ep_group().rank
+        is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        sp_size = tp_size if is_sequence_parallel else 1
+
         for module in moe_modules:
+            module.moe_config.num_local_experts = num_local_experts
             module.moe_config.num_experts = num_local_experts * new_ep_size
             module.global_num_experts = module.moe_config.num_experts
-            tp_size = get_tp_group().world_size
-            is_sequence_parallel = parallel_config.use_sequence_parallel_moe
-            sp_size = tp_size if is_sequence_parallel else 1
-            module.moe_parallel_config = FusedMoEParallelConfig.make(
-                tp_size_=tp_size,
-                pcp_size_=get_pcp_group().world_size,
-                dp_size_=get_dp_group().world_size,
-                sp_size_=sp_size,
-                vllm_parallel_config=parallel_config,
+
+            # FusedMoEParallelConfig.make() may compute stale ep_size from
+            # parallel_config, so patch it with the actual EP group values.
+            moe_parallel_config = replace(
+                FusedMoEParallelConfig.make(
+                    tp_size_=tp_size,
+                    pcp_size_=get_pcp_group().world_size,
+                    dp_size_=get_dp_group().world_size,
+                    sp_size_=sp_size,
+                    vllm_parallel_config=parallel_config,
+                ),
+                ep_size=ep_size,
+                ep_rank=ep_rank,
             )
-            module.moe_config.moe_parallel_config = module.moe_parallel_config
+            module.moe_parallel_config = moe_parallel_config
+            module.moe_config.moe_parallel_config = moe_parallel_config
+
+            # Update cached EP size used by NIXL/DeepEP dispatch
+            if hasattr(module, 'quant_method') and hasattr(module.quant_method, 'fused_experts'):
+                fused_experts = module.quant_method.fused_experts
+                if hasattr(fused_experts, 'prepare_finalize'):
+                    prepare_finalize = fused_experts.prepare_finalize
+                    if hasattr(prepare_finalize, 'num_dispatchers_'):
+                        prepare_finalize.num_dispatchers_ = ep_size
 
         # Update EPLB state
         eplb_state = self.worker.model_runner.eplb_state
@@ -316,15 +347,18 @@ class ElasticEPScalingExecutor:
         )
         old_physical_to_logical = eplb_model_state.physical_to_logical_map
         num_moe_layers = old_physical_to_logical.shape[0]
-        num_local_experts = eplb_model_state.expert_load_pass.shape[1] // old_ep_size
+        # Calculate how many local experts per GPU for the OLD configuration
+        # NOTE: Use a separate variable to avoid overwriting num_local_experts
+        # which comes from the actual weight tensor size
+        old_local_experts_per_gpu = eplb_model_state.expert_load_pass.shape[1] // old_ep_size
         if new_dp_size > old_dp_size:
             expanded_physical_to_logical = torch.full(
-                (num_moe_layers, num_local_experts * new_ep_size),
+                (num_moe_layers, old_local_experts_per_gpu * new_ep_size),
                 -1,
                 dtype=old_physical_to_logical.dtype,
                 device=old_physical_to_logical.device,
             )
-            expanded_physical_to_logical[:, : num_local_experts * old_ep_size] = (
+            expanded_physical_to_logical[:, : old_local_experts_per_gpu * old_ep_size] = (
                 old_physical_to_logical
             )
             eplb_model_state.physical_to_logical_map = expanded_physical_to_logical
@@ -341,7 +375,17 @@ class ElasticEPScalingExecutor:
             )
             eplb_model_state.expert_load_pass = expanded_expert_load_pass
             eplb_model_state.expert_load_window = expanded_expert_load_window
-            eplb_state.num_valid_physical_experts = old_num_physical_experts
+            # Virtual slot masking: keep num_active if it divides evenly
+            # across the new EP group. Otherwise masking is invalid (e.g.
+            # after scale-down reset num_active to a value not divisible
+            # by the new EP size) and we use all new slots.
+            if eplb_state.num_active_physical_experts % new_ep_size == 0:
+                eplb_state.num_valid_physical_experts = (
+                    eplb_state.num_active_physical_experts
+                )
+            else:
+                eplb_state.num_active_physical_experts = num_physical_experts
+                eplb_state.num_valid_physical_experts = num_physical_experts
         else:
             assert pad_size < 0
             eplb_model_state.expert_load_pass = eplb_model_state.expert_load_pass[
@@ -443,17 +487,30 @@ class ElasticEPScalingExecutor:
                 old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
                 for old_ep_rank in range(old_ep_size)
             }
-
             eplb_state.rearrange(rank_mapping=rank_mapping)
+
         # NOTE(yongji): check whether we need to synchronize here
         torch.cuda.synchronize()
         # reset expert_rearrangement_step to ensure all ranks are synchronized
         eplb_state.expert_rearrangement_step = 0
-        eplb_state.num_valid_physical_experts = (
-            eplb_model_state.physical_to_logical_map.shape[1]
+
+        # When virtual slot masking is active (active < total and not
+        # scale-down), num_valid tracks the active subset, not all slots.
+        total_tensor_slots = eplb_model_state.physical_to_logical_map.shape[1]
+        masking_active = (
+            eplb_state.num_active_physical_experts > 0
+            and eplb_state.num_active_physical_experts < total_tensor_slots
+            and new_dp_size is None
         )
+        if masking_active:
+            eplb_state.num_valid_physical_experts = (
+                eplb_state.num_active_physical_experts
+            )
+        else:
+            eplb_state.num_valid_physical_experts = total_tensor_slots
         eplb_state.is_async = is_async_enabled
         self.worker.model_runner.eep_eplb_suppressed = False
+
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
@@ -496,15 +553,19 @@ class ElasticEPScalingExecutor:
     def receive_expert_mapping(self) -> tuple[torch.Tensor, int, int]:
         dp_group = get_dp_group()
         assert isinstance(dp_group, StatelessGroupCoordinator)
-        physical_to_logical, num_local_physical_experts, num_logical_experts = (
-            broadcast_expert_mapping(
-                physical_to_logical=None,
-                num_local_physical_experts=None,
-                num_logical_experts=None,
-                dp_group=dp_group,
-                src_rank=0,
-                device=self.worker.device,
-            )
+        (
+            physical_to_logical,
+            num_local_physical_experts,
+            num_logical_experts,
+            num_active_physical_experts,
+        ) = broadcast_expert_mapping(
+            physical_to_logical=None,
+            num_local_physical_experts=None,
+            num_logical_experts=None,
+            num_active_physical_experts=None,
+            dp_group=dp_group,
+            src_rank=0,
+            device=self.worker.device,
         )
         num_moe_layers = physical_to_logical.shape[0]
         new_dp_size = get_dp_group().world_size
@@ -518,10 +579,11 @@ class ElasticEPScalingExecutor:
         )
         old_num_physical_experts = physical_to_logical.shape[1]
         expanded_physical_to_logical[:, :old_num_physical_experts] = physical_to_logical
+        # Return the actual active slot count (from sender), not tensor slot count
         return (
             expanded_physical_to_logical,
             num_logical_experts,
-            old_num_physical_experts,
+            num_active_physical_experts,
         )
 
     def prepare_new_worker(self) -> None:
