@@ -804,9 +804,9 @@ class EplbState:
             tcp_store_group = coordinator.tcp_store_group
             num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
             num_gpus = sum(new_rank != -1 for new_rank in rank_mapping.values())
-            num_replicas = (
-                num_replicas // ep_group.size() * num_gpus
-            )  # handle num replicas change
+
+            # Use all tensor slots on the remaining GPUs for rebalancing.
+            num_replicas = (num_total_physical // ep_group.size()) * num_gpus
         else:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
