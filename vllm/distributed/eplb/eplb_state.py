@@ -750,25 +750,29 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
-            expert_load_window = eplb_model_state.expert_load_window[
-                :, :, : self.num_valid_physical_experts
-            ]
+            phy2log_map = eplb_model_state.physical_to_logical_map
+            expert_load_window = eplb_model_state.expert_load_window
+
+            valid_mask = phy2log_map >= 0
+            # Replace -1 with 0 so scatter_add_ indices are valid;
+            # zero out the corresponding load so they contribute nothing.
+            safe_phy2log = phy2log_map.clamp(min=0)
+            masked_load = expert_load_window * valid_mask.unsqueeze(0)
+
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 eplb_model_state.model.num_moe_layers,
                 eplb_model_state.model.num_logical_experts,
-                dtype=eplb_model_state.expert_load_window.dtype,
-                device=eplb_model_state.expert_load_window.device,
+                dtype=expert_load_window.dtype,
+                device=expert_load_window.device,
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=eplb_model_state.physical_to_logical_map[
-                    :, : self.num_valid_physical_experts
-                ]
+                index=safe_phy2log
                 .unsqueeze(0)
-                .expand_as(expert_load_window)
+                .expand_as(masked_load)
                 .long(),
-                src=expert_load_window,
+                src=masked_load,
             )
 
             global_expert_load_window = logical_expert_load_window.sum(dim=0)
@@ -779,8 +783,17 @@ class EplbState:
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
         model = eplb_model_state.model
-        num_replicas = model.num_physical_experts
         num_groups = model.num_expert_groups
+
+        # Use active physical experts for EPLB rebalancing (virtual slot masking)
+        # This prevents creating too many redundant replicas after scale-up
+        if self.num_active_physical_experts > 0:
+            num_replicas = self.num_active_physical_experts
+        else:
+            num_replicas = model.num_physical_experts
+
+        # Total tensor slots (may be larger than num_replicas after scale-up)
+        num_total_physical = model.num_physical_experts
 
         if rank_mapping is not None and len(rank_mapping) == ep_group.size():
             # NOTE(yongji): scale down, we need to rebalance the experts on
@@ -824,6 +837,26 @@ class EplbState:
                     num_gpus,
                     eplb_model_state.physical_to_logical_map,
                 )
+
+                # Expand active slots to full tensor slots if virtual
+                # slot masking is active (scale-up without scale-down).
+                if (
+                    num_total_physical > num_replicas
+                    and rank_mapping is None
+                ):
+                    new_physical_to_logical_map = (
+                        self.expand_active_to_tensor_slots(
+                            new_physical_to_logical_map,
+                            num_total_physical,
+                        )
+                    )
+                    new_logical_to_physical_map = (
+                        self._remap_logical_to_physical(
+                            new_logical_to_physical_map,
+                            num_replicas,
+                            num_total_physical,
+                        )
+                    )
 
                 # Update expert weights
                 rearrange_expert_weights_inplace(
