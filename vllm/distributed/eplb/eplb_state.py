@@ -482,6 +482,95 @@ class EplbState:
         self.num_valid_physical_experts = model.num_physical_experts
         self.num_active_physical_experts = model.num_physical_experts
 
+        # Apply num_active_slots if set (for testing inactive slots)
+        # This reuses the virtual slot masking logic from scale-up
+        active_override = self.parallel_config.eplb_config.num_active_slots
+        if active_override > 0 and active_override < model.num_physical_experts:
+            # User wants fewer active slots than total tensor slots
+            # This simulates post-scale-up state where we have inactive slots
+            self.num_active_physical_experts = active_override
+            self.num_valid_physical_experts = active_override
+            
+            # Build a compact mapping for only num_active_slots experts
+            # This ensures all logical experts have coverage
+            num_redundant_for_active = active_override - model.num_logical_experts
+            if num_redundant_for_active < 0:
+                raise ValueError(
+                    f"num_active_slots ({active_override}) must be >= "
+                    f"num_logical_experts ({model.num_logical_experts})"
+                )
+            
+            active_phy2log_list = EplbState.build_initial_global_physical_to_logical_map(
+                model.num_routed_experts,
+                num_redundant_for_active,
+            )
+            active_phy2log = torch.tensor(
+                active_phy2log_list,
+                device=self.device,
+            ).unsqueeze(0).expand(model.num_moe_layers, -1).contiguous()
+            
+            # Expand active slots to full tensor slots using existing function
+            num_total_physical = model.num_physical_experts
+            expanded_phy2log = self.expand_active_to_tensor_slots(
+                active_phy2log,
+                num_total_physical,
+            )
+            model_state.physical_to_logical_map = expanded_phy2log
+            
+            # Rebuild logical_to_physical_map for active slots, then remap
+            active_log2phy = torch.full(
+                (model.num_logical_experts, active_override),
+                -1,
+                device=self.device,
+            )
+            active_replica_count = torch.zeros(
+                (model.num_logical_experts,),
+                device=self.device,
+                dtype=torch.long,
+            )
+            for i in range(active_override):
+                logical_idx = active_phy2log[0, i]
+                active_log2phy[logical_idx, active_replica_count[logical_idx]] = i
+                active_replica_count[logical_idx] += 1
+            
+            # Expand to layers
+            active_log2phy = active_log2phy.unsqueeze(0).expand(
+                model.num_moe_layers, -1, -1
+            ).contiguous()
+            active_replica_count = active_replica_count.unsqueeze(0).expand(
+                model.num_moe_layers, -1
+            ).contiguous()
+            
+            # Remap from active slot space to tensor slot space
+            remapped_log2phy = self._remap_logical_to_physical(
+                active_log2phy,
+                active_override,
+                num_total_physical,
+            )
+            
+            # Pad to max_slots_per_logical_expert
+            max_slots = model_state.logical_to_physical_map.shape[-1]
+            padded_log2phy = torch.full(
+                (model.num_moe_layers, model.num_logical_experts, max_slots),
+                -1,
+                device=self.device,
+                dtype=remapped_log2phy.dtype,
+            )
+            padded_log2phy[:, :, :remapped_log2phy.shape[-1]] = remapped_log2phy
+            
+            model_state.logical_to_physical_map = padded_log2phy
+            model_state.logical_replica_count = active_replica_count.clone()
+            
+            # Update the model's eplb state
+            # Note: clear expert_weights first since set_eplb_state appends to it
+            # and we already called it once during default setup
+            model.expert_weights.clear()
+            model.set_eplb_state(
+                model_state.expert_load_pass,
+                model_state.logical_to_physical_map,
+                model_state.logical_replica_count,
+            )
+
     def step(
         self,
         is_dummy: bool = False,
