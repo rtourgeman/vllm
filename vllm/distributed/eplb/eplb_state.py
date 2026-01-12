@@ -1141,6 +1141,7 @@ class EplbState:
         parallel_config: ParallelConfig,
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int,
+        num_active_physical_experts: int | None = None,
     ) -> "EplbState":
         eplb_state = cls(
             parallel_config=parallel_config,
@@ -1151,6 +1152,12 @@ class EplbState:
             model_config=model_config,
         )
         eplb_state.num_valid_physical_experts = num_valid_physical_experts
+        # Set num_active_physical_experts from sender (for virtual slot masking)
+        # If not provided, default to num_valid_physical_experts
+        if num_active_physical_experts is not None:
+            eplb_state.num_active_physical_experts = num_active_physical_experts
+        else:
+            eplb_state.num_active_physical_experts = num_valid_physical_experts
         num_moe_layers = expanded_physical_to_logical.shape[0]
         num_physical_experts = expanded_physical_to_logical.shape[1]
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
