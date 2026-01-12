@@ -384,6 +384,7 @@ class ElasticEPScalingExecutor:
             # num_valid reflects what EPLB considers "usable" for load tracking
             eplb_state.num_valid_physical_experts = eplb_state.num_active_physical_experts
         else:
+            # Scale-down: truncate EPLB state to match new slot count
             assert pad_size < 0
             eplb_model_state.expert_load_pass = eplb_model_state.expert_load_pass[
                 :, :num_physical_experts
@@ -392,6 +393,7 @@ class ElasticEPScalingExecutor:
                 :, :, :num_physical_experts
             ]
             eplb_state.num_valid_physical_experts = num_physical_experts
+            eplb_state.num_active_physical_experts = num_physical_experts
 
         model = self.worker.model_runner.get_model()
         model.expert_weights = []
@@ -454,6 +456,12 @@ class ElasticEPScalingExecutor:
         ):
             bt.block_table.gpu.copy_(saved_gpu)
             bt.block_table.cpu.copy_(saved_cpu)
+
+        # For scale-down: re-enable EPLB after switch_and_prepare completes
+        # (create_standby_groups sets eep_eplb_suppressed=True, but for scale-down
+        # perform_eplb_reshuffle already ran BEFORE switch_and_prepare)
+        if new_ep_size < old_ep_size:
+            self.worker.model_runner.eep_eplb_suppressed = False
 
     def perform_eplb_reshuffle(self, new_dp_size: int | None = None) -> None:
         if get_ep_group().rank == 0:
