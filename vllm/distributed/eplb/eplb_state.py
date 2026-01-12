@@ -837,9 +837,26 @@ class EplbState:
             tcp_store_group = coordinator.tcp_store_group
             num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
             num_gpus = sum(new_rank != -1 for new_rank in rank_mapping.values())
-            num_replicas = (
-                num_replicas // ep_group.size() * num_gpus
-            )  # handle num replicas change
+            
+            # For scale-down: use all available tensor slots on remaining GPUs
+            # We need at least num_logical_experts slots, and we have
+            # num_local_experts * num_gpus slots available after scale-down
+            num_local_experts = num_total_physical // ep_group.size()
+            available_slots = num_local_experts * num_gpus
+            num_logical = model.num_logical_experts
+
+            # Ensure we have enough slots for all logical experts
+            if available_slots >= num_logical:
+                num_replicas = available_slots
+            else:
+                # Shouldn't happen - would need to drop experts
+                logger.warning(
+                    "[EPLB rearrange] Scale-down: available_slots=%d < num_logical=%d! "
+                    "Using available_slots.",
+                    available_slots, num_logical
+                )
+                num_replicas = available_slots
+            
         else:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
