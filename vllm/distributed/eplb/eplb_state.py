@@ -311,6 +311,13 @@ class EplbState:
         newly started EP ranks may not have physical experts
         mapped yet.
         """
+        self.num_active_physical_experts: int = 0
+        """
+        Number of physical expert slots EPLB uses for rebalancing.
+        After scale-up, this may be smaller than the total tensor slots
+        (num_valid_physical_experts) to prevent over-replication.
+        0 means all slots are active (no masking).
+        """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
@@ -513,6 +520,7 @@ class EplbState:
         )
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
+        self.num_active_physical_experts = model.num_physical_experts
 
     def step(
         self,
@@ -639,6 +647,72 @@ class EplbState:
                 return
             self.expert_rearrangement_step = 0
             self.rearrange()
+
+    def expand_active_to_tensor_slots(
+        self,
+        active_phy2log: torch.Tensor,
+        num_total_physical: int,
+    ) -> torch.Tensor:
+        """
+        Expand EPLB output from active-slot space to tensor-slot space.
+
+        After scale-up, each GPU may have more tensor slots than active
+        slots. Active slots are placed in the first positions on each GPU;
+        remaining slots are filled with -1.
+        """
+        num_layers = active_phy2log.shape[0]
+        num_active = active_phy2log.shape[1]
+        ep_size = get_ep_group().world_size
+        assert num_active % ep_size == 0
+        assert num_total_physical % ep_size == 0
+
+        num_local_active = num_active // ep_size
+        num_local_total = num_total_physical // ep_size
+
+        full_phy2log = torch.full(
+            (num_layers, num_total_physical),
+            -1,
+            dtype=active_phy2log.dtype,
+            device=active_phy2log.device,
+        )
+
+        # Map active EPLB slots to first N tensor slots on each GPU
+        for gpu in range(ep_size):
+            active_start = gpu * num_local_active
+            active_end = (gpu + 1) * num_local_active
+            tensor_start = gpu * num_local_total
+            tensor_end = tensor_start + num_local_active
+
+            full_phy2log[:, tensor_start:tensor_end] = (
+                active_phy2log[:, active_start:active_end]
+            )
+
+        return full_phy2log
+
+    def _remap_logical_to_physical(
+        self,
+        log2phy: torch.Tensor,
+        num_active: int,
+        num_total_physical: int,
+    ) -> torch.Tensor:
+        """
+        Remap logical-to-physical indices from active-slot to tensor-slot
+        numbering, accounting for the gap between active and total slots
+        on each GPU.
+        """
+        ep_size = get_ep_group().world_size
+        assert num_active % ep_size == 0
+        assert num_total_physical % ep_size == 0
+        num_local_active = num_active // ep_size
+        num_local_total = num_total_physical // ep_size
+
+        remapped = log2phy.clone()
+        valid_mask = remapped >= 0
+        active_indices = remapped[valid_mask]
+        gpu_ids = active_indices // num_local_active
+        local_offsets = active_indices % num_local_active
+        remapped[valid_mask] = gpu_ids * num_local_total + local_offsets
+        return remapped
 
     def rearrange(
         self,
