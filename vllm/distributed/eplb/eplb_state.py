@@ -774,9 +774,24 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
-            expert_load_window = eplb_model_state.expert_load_window[
-                :, :, : self.num_valid_physical_experts
-            ]
+            # Get the full physical_to_logical_map and expert_load_window
+            phy2log_map = eplb_model_state.physical_to_logical_map
+            expert_load_window = eplb_model_state.expert_load_window
+            
+            # Create mask for valid (non -1) entries in physical_to_logical_map
+            # Shape: [num_layers, num_physical_experts]
+            valid_mask = phy2log_map >= 0
+            
+            # Replace -1 with 0 to avoid index errors, but we'll zero out the load
+            # Shape: [num_layers, num_physical_experts]
+            safe_phy2log = torch.where(valid_mask, phy2log_map, torch.zeros_like(phy2log_map))
+            
+            # Zero out load for inactive slots (where phy2log is -1)
+            # Shape: [window_size, num_layers, num_physical_experts]
+            valid_mask_expanded = valid_mask.unsqueeze(0).expand_as(expert_load_window)
+            masked_load = torch.where(valid_mask_expanded, expert_load_window, 
+                                      torch.zeros_like(expert_load_window))
+            
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 eplb_model_state.model.num_moe_layers,
@@ -786,13 +801,11 @@ class EplbState:
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=eplb_model_state.physical_to_logical_map[
-                    :, : self.num_valid_physical_experts
-                ]
+                index=safe_phy2log
                 .unsqueeze(0)
-                .expand_as(expert_load_window)
+                .expand_as(masked_load)
                 .long(),
-                src=expert_load_window,
+                src=masked_load,
             )
 
             global_expert_load_window = logical_expert_load_window.sum(dim=0)
@@ -803,8 +816,17 @@ class EplbState:
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
         model = eplb_model_state.model
-        num_replicas = model.num_physical_experts
         num_groups = model.num_expert_groups
+        
+        # Use active physical experts for EPLB rebalancing (virtual slot masking)
+        # This prevents creating too many redundant replicas after scale-up
+        if self.num_active_physical_experts > 0:
+            num_replicas = self.num_active_physical_experts
+        else:
+            num_replicas = model.num_physical_experts
+        
+        # Total tensor slots (may be larger than num_replicas after scale-up)
+        num_total_physical = model.num_physical_experts
 
         if rank_mapping is not None and len(rank_mapping) == ep_group.size():
             # NOTE(yongji): scale down, we need to rebalance the experts on
@@ -846,6 +868,23 @@ class EplbState:
                 num_nodes,
                 num_gpus,
             )
+
+            # Expand active slots to full tensor slots if needed
+            # (virtual slot masking for elastic EP scale-up)
+            if (
+                num_total_physical > num_replicas
+                and rank_mapping is None
+            ):
+                new_physical_to_logical_map = self.expand_active_to_tensor_slots(
+                    new_physical_to_logical_map,
+                    num_total_physical,
+                )
+                # Remap logical_to_physical_map from active slot space to tensor slot space
+                new_logical_to_physical_map = self._remap_logical_to_physical(
+                    new_logical_to_physical_map,
+                    num_replicas,
+                    num_total_physical,
+                )
 
             if not eplb_model_state.is_async_enabled or is_profile:
                 # Update expert weights
