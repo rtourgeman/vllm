@@ -104,8 +104,21 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         rank = torch.zeros(n, num_phy, dtype=torch.int64, device=device)
         logcnt = torch.ones(n, num_log, dtype=torch.int64, device=device)
         arangen = torch.arange(n, dtype=torch.int64, device=device)
+
+        has_load_stats = (weight.abs().max() > 1e-6)
+
         for i in range(num_log, num_phy):
-            redundant_indices = (weight / logcnt).max(dim=-1).indices
+            if has_load_stats:
+                load_ratio = weight / logcnt
+                redundant_indices = load_ratio.max(dim=-1).indices
+            else:
+                logical_idx = i % num_log
+                redundant_indices = torch.full(
+                    (n,),
+                    logical_idx,
+                    dtype=torch.int64,
+                    device=device
+                )
             phy2log[:, i] = redundant_indices
             rank[:, i] = logcnt[arangen, redundant_indices]
             logcnt[arangen, redundant_indices] += 1
