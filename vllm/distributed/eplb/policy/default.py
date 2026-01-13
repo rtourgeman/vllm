@@ -94,8 +94,17 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         phy2log = np.tile(np.arange(num_phy, dtype=np.int64), (n, 1))
         logcnt = np.ones((n, num_log), dtype=np.int64)
         arangen = np.arange(n, dtype=np.int64)
+
+        has_load_stats = np.abs(weight).max() > 1e-6
+
         for i in range(num_log, num_phy):
-            redundant_indices = np.argmax(weight / logcnt, axis=-1)
+            if has_load_stats:
+                redundant_indices = np.argmax(weight / logcnt, axis=-1)
+            else:
+                logical_idx = i % num_log
+                redundant_indices = np.full(
+                    (n,), logical_idx, dtype=np.int64
+                )
             phy2log[:, i] = redundant_indices
             logcnt[arangen, redundant_indices] += 1
         return phy2log, logcnt
