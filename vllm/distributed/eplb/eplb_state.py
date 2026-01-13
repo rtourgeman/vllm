@@ -955,6 +955,20 @@ class EplbState:
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
             self.rearrange_event.set()
+
+        # Log the new physical_to_logical_map for debugging
+        if is_main_rank:
+            num_physical = new_physical_to_logical_map.shape[1]
+            layer0_map = new_physical_to_logical_map[0].tolist()
+            slots_per_gpu_display = num_physical // num_gpus if num_gpus > 0 else num_physical
+            condensed_view = []
+            for gpu_idx in range(num_gpus):
+                start = gpu_idx * slots_per_gpu_display
+                end = start + slots_per_gpu_display
+                preview = layer0_map[start:end]
+                condensed_view.append(f"RANK{gpu_idx}: {preview}")
+            logger.info("[EPLB Rearrange] New physical_to_logical_map (layer 0):\n%s","\n".join(condensed_view),)
+
         return None
 
     def start_async_loop(
