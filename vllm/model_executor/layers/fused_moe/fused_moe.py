@@ -1152,6 +1152,20 @@ def fused_topk(
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
     M, _ = hidden_states.size()
+    num_experts = gating_output.size(1)
+
+    # Debug: Check if input gating_output is invalid (contains NaN)
+    # Only check when NOT capturing CUDA graph (item() causes sync)
+    if not torch.cuda.is_current_stream_capturing():
+        has_nan = torch.isnan(gating_output).any().item()
+        if has_nan:
+            logger.warning(
+                "[FUSED_TOPK INPUT] INVALID INPUT DETECTED! "
+                f"gating_output has NaN. Shape: {gating_output.shape}, "
+                f"dtype: {gating_output.dtype}, "
+                f"data_ptr: {hex(gating_output.data_ptr())}, "
+                f"M={M}, num_experts={num_experts}, topk={topk}"
+            )
 
     topk_weights = torch.empty(
         M, topk, dtype=torch.float32, device=hidden_states.device
@@ -1170,6 +1184,23 @@ def fused_topk(
     topk_weights, topk_ids = topk_func(
         topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
+
+    # Debug: Check if output topk_ids has duplicates (sign of corruption)
+    # Only check when NOT capturing CUDA graph (tolist() causes sync)
+    if not torch.cuda.is_current_stream_capturing() and M > 0 and topk > 1:
+        # Check first few tokens for duplicates
+        check_count = min(10, M)
+        for i in range(check_count):
+            row = topk_ids[i].tolist()
+            if len(row) != len(set(row)):
+                logger.warning(
+                    f"[FUSED_TOPK OUTPUT] DUPLICATE EXPERTS DETECTED! "
+                    f"Token {i}: {row}, "
+                    f"gating_ptr: {hex(gating_output.data_ptr())}, "
+                    f"ids_ptr: {hex(topk_ids.data_ptr())}, "
+                    f"M={M}, num_experts={num_experts}"
+                )
+                break
 
     return topk_weights, topk_ids, token_expert_indices
 
