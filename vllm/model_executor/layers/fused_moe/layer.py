@@ -1535,6 +1535,16 @@ class FusedMoE(CustomOp):
             fused_topk_bias,
         )
 
+        # Debug: Check router_logits at entry to select_experts
+        if not torch.cuda.is_current_stream_capturing():
+            has_nan = torch.isnan(router_logits).any().item()
+            if has_nan:
+                logger.warning(
+                    f"[SELECT_EXPERTS ENTRY] router_logits has NaN! "
+                    f"Shape: {router_logits.shape}, "
+                    f"data_ptr: {hex(router_logits.data_ptr())}"
+                )
+
         if self.enable_eplb:
             if self.quant_method.supports_eplb:
                 if self.expert_load_view is None:
@@ -1743,6 +1753,16 @@ class FusedMoE(CustomOp):
         assert self.batched_hidden_states.size(-1) == full_hidden_states.size(-1)
         assert self.batched_router_logits.size(-1) == full_router_logits.size(-1)
 
+        # Debug: Check for NaN in full_router_logits at entry
+        if not torch.cuda.is_current_stream_capturing():
+            has_nan = torch.isnan(full_router_logits).any().item()
+            if has_nan:
+                logger.warning(
+                    f"[FORWARD_IMPL_CHUNKED ENTRY] full_router_logits has NaN! "
+                    f"Shape: {full_router_logits.shape}, "
+                    f"data_ptr: {hex(full_router_logits.data_ptr())}"
+                )
+
         full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
@@ -1777,6 +1797,19 @@ class FusedMoE(CustomOp):
             staged_router_logits = batched_router_logits[:chunk_size, :]  # type: ignore
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
+
+            # Debug: Check for NaN before and after copy
+            if not torch.cuda.is_current_stream_capturing():
+                src_has_nan = torch.isnan(router_logits).any().item()
+                dst_has_nan = torch.isnan(staged_router_logits).any().item()
+                if src_has_nan or dst_has_nan:
+                    logger.warning(
+                        f"[PROCESS_CHUNK] NaN detected! "
+                        f"src_has_nan={src_has_nan}, dst_has_nan={dst_has_nan}, "
+                        f"src_ptr={hex(router_logits.data_ptr())}, "
+                        f"dst_ptr={hex(staged_router_logits.data_ptr())}, "
+                        f"chunk_size={chunk_size}"
+                    )
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
@@ -1850,6 +1883,16 @@ class FusedMoE(CustomOp):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
+
+        # Debug: Check router_logits at entry to forward_impl
+        if not torch.cuda.is_current_stream_capturing():
+            has_nan = torch.isnan(router_logits).any().item()
+            if has_nan:
+                logger.warning(
+                    f"[FORWARD_IMPL ENTRY] router_logits has NaN! "
+                    f"Shape: {router_logits.shape}, "
+                    f"data_ptr: {hex(router_logits.data_ptr())}"
+                )
 
         self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
@@ -2064,6 +2107,16 @@ def moe_forward(
     router_logits: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
+    # Debug: Check router_logits at entry to moe_forward (from compiled graph)
+    if not torch.cuda.is_current_stream_capturing():
+        has_nan = torch.isnan(router_logits).any().item()
+        if has_nan:
+            logger.warning(
+                f"[MOE_FORWARD ENTRY] router_logits from compiled graph has NaN! "
+                f"layer={layer_name}, Shape: {router_logits.shape}, "
+                f"data_ptr: {hex(router_logits.data_ptr())}"
+            )
+
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.shared_experts is None
