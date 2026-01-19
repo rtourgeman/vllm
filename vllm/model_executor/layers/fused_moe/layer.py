@@ -646,6 +646,13 @@ class FusedMoE(CustomOp):
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
 
+        # Stable buffer for router_logits to prevent CUDA graph memory aliasing
+        # When TorchInductor compiles the model, router_logits may be allocated
+        # at different addresses. During CUDA graph replay under high memory
+        # pressure, these addresses can be overwritten by KV cache allocations.
+        # This buffer ensures a stable address for CUDA graph safety.
+        self._router_logits_buffer: torch.Tensor | None = None
+
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
     # This is called after all weight loading and post-processing, so it
@@ -1512,6 +1519,57 @@ class FusedMoE(CustomOp):
             logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
         )
 
+    def _ensure_router_logits_buffer(
+        self, router_logits: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Ensure router_logits uses a stable pre-allocated buffer for CUDA graph
+        safety. This prevents memory aliasing issues where TorchInductor's
+        temporary buffer addresses get overwritten by KV cache allocations
+        during high memory usage.
+
+        Args:
+            router_logits: Input router logits tensor
+
+        Returns:
+            A view into the stable buffer containing copied router_logits data
+        """
+        num_tokens, num_experts = router_logits.shape
+
+        # Allocate buffer on first use (lazy initialization)
+        # Use a large fixed size to avoid reallocation during CUDA graph capture
+        if self._router_logits_buffer is None:
+            # Use scheduler's max_num_batched_tokens for buffer size
+            max_tokens = (
+                self.vllm_config.scheduler_config.max_num_batched_tokens
+                if self.vllm_config.scheduler_config is not None
+                else 8192  # Fallback default
+            )
+            self._router_logits_buffer = torch.empty(
+                (max_tokens, self.logical_num_experts),
+                dtype=router_logits.dtype,
+                device=router_logits.device,
+            )
+
+        # Ensure buffer is large enough - but avoid reallocation during
+        # CUDA graph capture by using a significantly larger buffer
+        if num_tokens > self._router_logits_buffer.shape[0]:
+            new_size = max(num_tokens * 2, self._router_logits_buffer.shape[0] * 2)
+            self._router_logits_buffer = torch.empty(
+                (new_size, self.logical_num_experts),
+                dtype=router_logits.dtype,
+                device=router_logits.device,
+            )
+
+        # Get a view of the buffer for current batch size
+        stable_router_logits = self._router_logits_buffer[:num_tokens, :]
+
+        # Synchronous copy to ensure data is ready before any downstream ops
+        # torch.cuda.synchronize() not needed as copy_ is synchronous by default
+        stable_router_logits.copy_(router_logits)
+
+        return stable_router_logits
+
     def select_experts(
         self,
         hidden_states: torch.Tensor,
@@ -1873,6 +1931,11 @@ class FusedMoE(CustomOp):
         #        separate cuda stream)
         if self.gate is not None:
             router_logits, _ = self.gate(hidden_states)
+
+        # Copy router_logits to stable buffer for CUDA graph safety.
+        # TorchInductor may allocate router_logits at different addresses,
+        # which can be overwritten by KV cache during high memory usage.
+        router_logits = self._ensure_router_logits_buffer(router_logits)
 
         if use_chunked_impl:
             return self.forward_impl_chunked(
