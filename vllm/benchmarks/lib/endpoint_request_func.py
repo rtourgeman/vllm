@@ -18,6 +18,11 @@ from tqdm.asyncio import tqdm
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
+# Retry configuration for 503 Service Unavailable errors (e.g., during elastic scaling)
+RETRY_ON_503_MAX_ATTEMPTS = 120  # Max retry attempts
+RETRY_ON_503_INITIAL_DELAY = 1.0  # Initial delay in seconds
+RETRY_ON_503_MAX_DELAY = 5.0  # Max delay between retries in seconds
+
 
 class StreamedResponseHandler:
     """Handles streaming HTTP responses by accumulating chunks until complete
@@ -152,6 +157,8 @@ async def async_request_openai_completions(
     Returns:
         The output of the request function.
     """
+    import asyncio
+
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Completions API", "completions")
 
@@ -183,69 +190,101 @@ async def async_request_openai_completions(
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
-    try:
-        async with session.post(url=api_url, json=payload, headers=headers) as response:
-            if response.status == 200:
-                first_chunk_received = False
-                handler = StreamedResponseHandler()
 
-                async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
-                    if not chunk_bytes:
-                        continue
+    # Retry loop for 503 errors (e.g., during elastic EP scaling)
+    retry_attempt = 0
+    retry_delay = RETRY_ON_503_INITIAL_DELAY
 
-                    messages = handler.add_chunk(chunk_bytes)
-                    for message in messages:
-                        # NOTE: SSE comments (often used as pings) start with
-                        # a colon. These are not JSON data payload and should
-                        # be skipped.
-                        if message.startswith(":"):
+    while True:
+        try:
+            async with session.post(url=api_url, json=payload, headers=headers) as response:
+                if response.status == 503:
+                    # Service unavailable - likely scaling, retry with backoff
+                    retry_attempt += 1
+                    if retry_attempt >= RETRY_ON_503_MAX_ATTEMPTS:
+                        output.error = (
+                            f"Max retries ({RETRY_ON_503_MAX_ATTEMPTS}) exceeded "
+                            "for 503 Service Unavailable"
+                        )
+                        output.success = False
+                        if pbar:
+                            pbar.update(1)
+                        return output
+
+                    # Wait before retrying
+                    await asyncio.sleep(retry_delay)
+                    # Exponential backoff with cap
+                    retry_delay = min(retry_delay * 1.5, RETRY_ON_503_MAX_DELAY)
+                    # Reset timing for the actual request
+                    st = time.perf_counter()
+                    output.start_time = st
+                    most_recent_timestamp = st
+                    continue  # Retry the request
+
+                if response.status == 200:
+                    first_chunk_received = False
+                    handler = StreamedResponseHandler()
+
+                    async for chunk_bytes in response.content.iter_any():
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
                             continue
 
-                        chunk = message.removeprefix("data: ")
+                        messages = handler.add_chunk(chunk_bytes)
+                        for message in messages:
+                            # NOTE: SSE comments (often used as pings) start with
+                            # a colon. These are not JSON data payload and should
+                            # be skipped.
+                            if message.startswith(":"):
+                                continue
 
-                        if chunk != "[DONE]":
-                            data = json.loads(chunk)
+                            chunk = message.removeprefix("data: ")
 
-                            # NOTE: Some completion API might have a last
-                            # usage summary response without a token so we
-                            # want to check a token was generated
-                            if choices := data.get("choices"):
-                                # Note that text could be empty here
-                                # e.g. for special tokens
-                                text = choices[0].get("text")
-                                timestamp = time.perf_counter()
-                                # First token
-                                if not first_chunk_received:
-                                    first_chunk_received = True
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
+                            if chunk != "[DONE]":
+                                data = json.loads(chunk)
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                                # NOTE: Some completion API might have a last
+                                # usage summary response without a token so we
+                                # want to check a token was generated
+                                if choices := data.get("choices"):
+                                    # Note that text could be empty here
+                                    # e.g. for special tokens
+                                    text = choices[0].get("text")
+                                    timestamp = time.perf_counter()
+                                    # First token
+                                    if not first_chunk_received:
+                                        first_chunk_received = True
+                                        ttft = time.perf_counter() - st
+                                        output.ttft = ttft
 
-                                most_recent_timestamp = timestamp
-                                generated_text += text or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get("completion_tokens")
-                if first_chunk_received:
-                    output.success = True
+                                    # Decoding phase
+                                    else:
+                                        output.itl.append(timestamp - most_recent_timestamp)
+
+                                    most_recent_timestamp = timestamp
+                                    generated_text += text or ""
+                                elif usage := data.get("usage"):
+                                    output.output_tokens = usage.get("completion_tokens")
+                    if first_chunk_received:
+                        output.success = True
+                    else:
+                        output.success = False
+                        output.error = (
+                            "Never received a valid chunk to calculate TTFT."
+                            "This response will be marked as failed!"
+                        )
+                    output.generated_text = generated_text
+                    output.latency = most_recent_timestamp - st
+                    break  # Success - exit retry loop
                 else:
+                    output.error = response.reason or ""
                     output.success = False
-                    output.error = (
-                        "Never received a valid chunk to calculate TTFT."
-                        "This response will be marked as failed!"
-                    )
-                output.generated_text = generated_text
-                output.latency = most_recent_timestamp - st
-            else:
-                output.error = response.reason or ""
-                output.success = False
-    except Exception:
-        output.success = False
-        exc_info = sys.exc_info()
-        output.error = "".join(traceback.format_exception(*exc_info))
+                    break  # Non-503 error - exit retry loop
+        except Exception:
+            output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
+            break  # Exception - exit retry loop
 
     if pbar:
         pbar.update(1)
@@ -282,6 +321,8 @@ async def async_request_openai_chat_completions(
     pbar: tqdm | None = None,
     mm_position: Literal["first", "last"] = "last",
 ) -> RequestFuncOutput:
+    import asyncio
+
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Chat Completions API", "chat/completions")
 
@@ -317,56 +358,90 @@ async def async_request_openai_chat_completions(
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
-    try:
-        async with session.post(url=api_url, json=payload, headers=headers) as response:
-            if response.status == 200:
-                handler = StreamedResponseHandler()
-                async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
-                    if not chunk_bytes:
-                        continue
 
-                    messages = handler.add_chunk(chunk_bytes)
-                    for message in messages:
-                        # NOTE: SSE comments (often used as pings) start with
-                        # a colon. These are not JSON data payload and should
-                        # be skipped.
-                        if message.startswith(":"):
+    # Retry loop for 503 errors (e.g., during elastic EP scaling)
+    retry_attempt = 0
+    retry_delay = RETRY_ON_503_INITIAL_DELAY
+
+    while True:
+        try:
+            async with session.post(url=api_url, json=payload, headers=headers) as response:
+                if response.status == 503:
+                    # Service unavailable - likely scaling, retry with backoff
+                    retry_attempt += 1
+                    if retry_attempt >= RETRY_ON_503_MAX_ATTEMPTS:
+                        output.error = (
+                            f"Max retries ({RETRY_ON_503_MAX_ATTEMPTS}) exceeded "
+                            "for 503 Service Unavailable"
+                        )
+                        output.success = False
+                        if pbar:
+                            pbar.update(1)
+                        return output
+
+                    # Wait before retrying
+                    await asyncio.sleep(retry_delay)
+                    # Exponential backoff with cap
+                    retry_delay = min(retry_delay * 1.5, RETRY_ON_503_MAX_DELAY)
+                    # Reset timing for the actual request
+                    st = time.perf_counter()
+                    output.start_time = st
+                    most_recent_timestamp = st
+                    ttft = 0.0
+                    generated_text = ""
+                    continue  # Retry the request
+
+                if response.status == 200:
+                    handler = StreamedResponseHandler()
+                    async for chunk_bytes in response.content.iter_any():
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
                             continue
 
-                        chunk = message.removeprefix("data: ")
+                        messages = handler.add_chunk(chunk_bytes)
+                        for message in messages:
+                            # NOTE: SSE comments (often used as pings) start with
+                            # a colon. These are not JSON data payload and should
+                            # be skipped.
+                            if message.startswith(":"):
+                                continue
 
-                        if chunk != "[DONE]":
-                            timestamp = time.perf_counter()
-                            data = json.loads(chunk)
+                            chunk = message.removeprefix("data: ")
 
-                            if choices := data.get("choices"):
-                                content = choices[0]["delta"].get("content")
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
+                            if chunk != "[DONE]":
+                                timestamp = time.perf_counter()
+                                data = json.loads(chunk)
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                                if choices := data.get("choices"):
+                                    content = choices[0]["delta"].get("content")
+                                    # First token
+                                    if ttft == 0.0:
+                                        ttft = timestamp - st
+                                        output.ttft = ttft
 
-                                generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get("completion_tokens")
+                                    # Decoding phase
+                                    else:
+                                        output.itl.append(timestamp - most_recent_timestamp)
 
-                            most_recent_timestamp = timestamp
+                                    generated_text += content or ""
+                                elif usage := data.get("usage"):
+                                    output.output_tokens = usage.get("completion_tokens")
 
-                output.generated_text = generated_text
-                output.success = True
-                output.latency = most_recent_timestamp - st
-            else:
-                output.error = response.reason or ""
-                output.success = False
-    except Exception:
-        output.success = False
-        exc_info = sys.exc_info()
-        output.error = "".join(traceback.format_exception(*exc_info))
+                                most_recent_timestamp = timestamp
+
+                    output.generated_text = generated_text
+                    output.success = True
+                    output.latency = most_recent_timestamp - st
+                    break  # Success - exit retry loop
+                else:
+                    output.error = response.reason or ""
+                    output.success = False
+                    break  # Non-503 error - exit retry loop
+        except Exception:
+            output.success = False
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
+            break  # Exception - exit retry loop
 
     if pbar:
         pbar.update(1)
