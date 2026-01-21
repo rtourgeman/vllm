@@ -59,6 +59,40 @@ TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) a
 )
 
 
+async def trigger_elastic_scale(
+    base_url: str,
+    new_dp_size: int,
+    session: aiohttp.ClientSession,
+) -> bool:
+    """
+    Trigger elastic EP scale-up/down on the vLLM server.
+    
+    Args:
+        base_url: The base URL of the vLLM server (e.g., http://localhost:8000)
+        new_dp_size: The new data_parallel_size to scale to
+        session: The aiohttp session to use for the request
+        
+    Returns:
+        True if scale request was accepted, False otherwise
+    """
+    scale_url = f"{base_url}/scale_elastic_ep"
+    payload = {"new_data_parallel_size": new_dp_size}
+    
+    try:
+        async with session.post(url=scale_url, json=payload) as response:
+            if response.status == 200:
+                result = await response.json()
+                print(f"\n[Elastic EP] Scale request accepted: {result}")
+                return True
+            else:
+                error_text = await response.text()
+                print(f"\n[Elastic EP] Scale request failed ({response.status}): {error_text}")
+                return False
+    except Exception as e:
+        print(f"\n[Elastic EP] Scale request error: {e}")
+        return False
+
+
 async def get_first_model_from_server(
     base_url: str, headers: dict | None = None
 ) -> tuple[str, str]:
@@ -539,6 +573,8 @@ async def benchmark(
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
+    scale_up_after: int | None = None,
+    scale_up_to: int | None = None,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -707,6 +743,10 @@ async def benchmark(
             }
         )
 
+    # Track request count for elastic scaling trigger
+    request_count = 0
+    scale_triggered = False
+
     async for request, current_request_rate in get_request(
         input_requests,
         request_rate,
@@ -715,6 +755,22 @@ async def benchmark(
         ramp_up_start_rps,
         ramp_up_end_rps,
     ):
+        # Check if we should trigger elastic scale-up
+        if (
+            scale_up_after is not None
+            and scale_up_to is not None
+            and not scale_triggered
+            and request_count >= scale_up_after
+        ):
+            scale_triggered = True
+            print(f"\n[Elastic EP] Triggering scale-up to {scale_up_to} "
+                  f"after {request_count} requests...")
+            asyncio.create_task(
+                trigger_elastic_scale(base_url, scale_up_to, session)
+            )
+
+        request_count += 1
+
         if ramp_up_strategy is not None:
             current_int_rps = int(current_request_rate)
             if current_int_rps > last_int_rps:
@@ -1233,6 +1289,25 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Specify the prefix of request id.",
     )
 
+    # Elastic EP scaling arguments
+    elastic_group = parser.add_argument_group("elastic scaling parameters")
+    elastic_group.add_argument(
+        "--scale-up-after",
+        type=int,
+        default=None,
+        help="Trigger elastic EP scale-up after this many requests have been "
+        "dispatched. For example, --scale-up-after 1000 will trigger scale-up "
+        "after dispatching the 1000th request. Requires --scale-up-to.",
+    )
+    elastic_group.add_argument(
+        "--scale-up-to",
+        type=int,
+        default=None,
+        help="The new data_parallel_size to scale to when --scale-up-after "
+        "is triggered. For example, --scale-up-to 8 will scale from current "
+        "size (e.g., 4) to 8 GPUs.",
+    )
+
     sampling_group = parser.add_argument_group("sampling parameters")
     sampling_group.add_argument(
         "--top-p",
@@ -1371,6 +1446,24 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("Ramp-up start RPS must be less than end RPS")
         if args.ramp_up_strategy == "exponential" and args.ramp_up_start_rps == 0:
             raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
+
+    # Validate elastic scaling arguments
+    if args.scale_up_after is not None or args.scale_up_to is not None:
+        if args.scale_up_after is None or args.scale_up_to is None:
+            raise ValueError(
+                "Both --scale-up-after and --scale-up-to must be specified together."
+            )
+        if args.scale_up_after < 0:
+            raise ValueError("--scale-up-after must be non-negative")
+        if args.scale_up_to < 1:
+            raise ValueError("--scale-up-to must be at least 1")
+        if args.scale_up_after >= args.num_prompts:
+            raise ValueError(
+                f"--scale-up-after ({args.scale_up_after}) must be less than "
+                f"--num-prompts ({args.num_prompts})"
+            )
+        print(f"[Elastic EP] Will trigger scale-up to {args.scale_up_to} GPUs "
+              f"after {args.scale_up_after} requests")
 
     label = args.label
 
@@ -1515,6 +1608,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
+        scale_up_after=args.scale_up_after,
+        scale_up_to=args.scale_up_to,
     )
 
     # Save config and results to json
