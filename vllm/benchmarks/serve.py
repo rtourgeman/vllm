@@ -63,8 +63,7 @@ async def trigger_elastic_scale(
     base_url: str,
     new_dp_size: int,
     session: aiohttp.ClientSession,
-    on_complete: callable = None,
-) -> tuple[bool, float]:
+) -> bool:
     """
     Trigger elastic EP scale-up/down on the vLLM server.
     
@@ -72,33 +71,26 @@ async def trigger_elastic_scale(
         base_url: The base URL of the vLLM server (e.g., http://localhost:8000)
         new_dp_size: The new data_parallel_size to scale to
         session: The aiohttp session to use for the request
-        on_complete: Optional callback to call when scale completes
         
     Returns:
-        Tuple of (success: bool, duration: float in seconds)
+        True if scale request was accepted, False otherwise
     """
     scale_url = f"{base_url}/scale_elastic_ep"
     payload = {"new_data_parallel_size": new_dp_size}
     
-    start_time = time.perf_counter()
     try:
         async with session.post(url=scale_url, json=payload) as response:
-            duration = time.perf_counter() - start_time
             if response.status == 200:
                 result = await response.json()
                 print(f"\n[Elastic EP] Scale request accepted: {result}")
-                print(f"[Elastic EP] Scale-up took {duration:.2f} seconds")
-                if on_complete:
-                    on_complete(duration)
-                return True, duration
+                return True
             else:
                 error_text = await response.text()
                 print(f"\n[Elastic EP] Scale request failed ({response.status}): {error_text}")
-                return False, duration
+                return False
     except Exception as e:
-        duration = time.perf_counter() - start_time
         print(f"\n[Elastic EP] Scale request error: {e}")
-        return False, duration
+        return False
         return False
 
 
@@ -783,41 +775,22 @@ async def benchmark(
     # Track completed requests for elastic scaling trigger
     completed_count = 0
     scale_triggered = False
-    scale_completed = False
     
     # For capturing pre-scale-up metrics
     pre_scale_outputs: list[RequestFuncOutput] = []
     pre_scale_inputs: list[SampleRequest] = []
-    post_scale_outputs: list[RequestFuncOutput] = []
-    post_scale_inputs: list[SampleRequest] = []
     pre_scale_duration: float = 0.0
-    scale_up_duration: float = 0.0
-    scale_trigger_time: float = 0.0
-    scale_complete_time: float = 0.0
-    
-    def on_scale_complete(duration: float):
-        nonlocal scale_completed, scale_up_duration, scale_complete_time
-        scale_completed = True
-        scale_up_duration = duration
-        scale_complete_time = time.perf_counter()
     
     # Callback to trigger scale-up after N requests complete
     async def check_scale_up_on_completion(output: RequestFuncOutput, 
                                             input_request: SampleRequest):
-        nonlocal scale_triggered, completed_count, pre_scale_duration, scale_trigger_time
+        nonlocal scale_triggered, completed_count, pre_scale_duration
         completed_count += 1
         
-        # Categorize outputs based on scale state
+        # Store outputs for pre-scale metrics (before trigger)
         if not scale_triggered:
-            # Before scale-up was triggered
             pre_scale_outputs.append(output)
             pre_scale_inputs.append(input_request)
-        elif scale_completed:
-            # After scale-up completed (steady state)
-            post_scale_outputs.append(output)
-            post_scale_inputs.append(input_request)
-        # Outputs during scaling (after trigger but before complete) are not 
-        # counted in pre or post - they'll be in the total only
         
         if (
             scale_up_after is not None
@@ -826,12 +799,11 @@ async def benchmark(
             and completed_count >= scale_up_after
         ):
             scale_triggered = True
-            scale_trigger_time = time.perf_counter()
-            pre_scale_duration = scale_trigger_time - benchmark_start_time
+            pre_scale_duration = time.perf_counter() - benchmark_start_time
             print(f"\n[Elastic EP] Triggering scale-up to {scale_up_to} "
                   f"after {completed_count} requests completed...")
             asyncio.create_task(
-                trigger_elastic_scale(base_url, scale_up_to, session, on_scale_complete)
+                trigger_elastic_scale(base_url, scale_up_to, session)
             )
             # Update concurrency if specified
             if scale_up_concurrency is not None:
@@ -940,21 +912,20 @@ async def benchmark(
             goodput_config_dict=goodput_config_dict,
         )
         
-        # Calculate post-scale metrics (outputs AFTER scale-up completed - steady state)
-        # This excludes requests that completed during the scaling process
-        if scale_completed and len(post_scale_outputs) > 0:
-            # Duration from scale completion to benchmark end
-            post_scale_duration = benchmark_duration - pre_scale_duration - scale_up_duration
-            
-            if post_scale_duration > 0:
-                post_scale_metrics, _ = calculate_metrics(
-                    input_requests=post_scale_inputs,
-                    outputs=post_scale_outputs,
-                    dur_s=post_scale_duration,
-                    tokenizer=tokenizer,
-                    selected_percentiles=selected_percentiles,
-                    goodput_config_dict=goodput_config_dict,
-                )
+        # Calculate post-scale metrics (all outputs after scale-up trigger)
+        post_scale_outputs = [o for o in outputs if o not in pre_scale_outputs]
+        post_scale_inputs = [i for i in input_requests if i not in pre_scale_inputs]
+        post_scale_duration = benchmark_duration - pre_scale_duration
+        
+        if len(post_scale_outputs) > 0 and post_scale_duration > 0:
+            post_scale_metrics, _ = calculate_metrics(
+                input_requests=post_scale_inputs,
+                outputs=post_scale_outputs,
+                dur_s=post_scale_duration,
+                tokenizer=tokenizer,
+                selected_percentiles=selected_percentiles,
+                goodput_config_dict=goodput_config_dict,
+            )
 
     # Print pre-scale vs post-scale comparison if available
     if pre_scale_metrics is not None:
@@ -968,16 +939,8 @@ async def benchmark(
         print("{:<40} {:<10.2f}".format("Mean TPOT (ms):", pre_scale_metrics.mean_tpot_ms))
         print()
 
-    if scale_triggered:
-        # Count requests that completed during scaling
-        during_scale_count = len(outputs) - len(pre_scale_outputs) - len(post_scale_outputs)
-        print("{s:{c}^{n}}".format(s=" Scale-Up Duration ", n=60, c="="))
-        print("{:<40} {:<10.2f}".format("Scale-up duration (s):", scale_up_duration))
-        print("{:<40} {:<10}".format("Requests during scaling:", during_scale_count))
-        print()
-
     if post_scale_metrics is not None:
-        print("{s:{c}^{n}}".format(s=" Post-Scale Metrics (steady state) ", n=60, c="="))
+        print("{s:{c}^{n}}".format(s=" Post-Scale Metrics (after scale-up) ", n=60, c="="))
         print("{:<40} {:<10}".format("Requests completed:", post_scale_metrics.completed))
         print("{:<40} {:<10}".format("Failed requests:", post_scale_metrics.failed))
         print("{:<40} {:<10.2f}".format("Duration (s):", post_scale_duration))
