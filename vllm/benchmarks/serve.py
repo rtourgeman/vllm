@@ -575,6 +575,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     scale_up_after: int | None = None,
     scale_up_to: int | None = None,
+    scale_up_concurrency: int | None = None,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -717,14 +718,25 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    semaphore = (
-        asyncio.Semaphore(max_concurrency)
-        if max_concurrency
-        else contextlib.nullcontext()
-    )
+    # Use a mutable holder for the semaphore so we can update it after scale-up
+    # This allows changing concurrency dynamically
+    class SemaphoreHolder:
+        def __init__(self, limit: int | None):
+            self.semaphore = (
+                asyncio.Semaphore(limit) if limit else contextlib.nullcontext()
+            )
+            self.current_limit = limit
+
+        def update(self, new_limit: int):
+            """Create a new semaphore with updated limit."""
+            self.semaphore = asyncio.Semaphore(new_limit)
+            self.current_limit = new_limit
+            print(f"[Elastic EP] Concurrency updated to {new_limit}")
+
+    semaphore_holder = SemaphoreHolder(max_concurrency)
 
     async def limited_request_func(request_func_input, session, pbar):
-        async with semaphore:
+        async with semaphore_holder.semaphore:
             return await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
             )
@@ -768,6 +780,9 @@ async def benchmark(
             asyncio.create_task(
                 trigger_elastic_scale(base_url, scale_up_to, session)
             )
+            # Update concurrency if specified
+            if scale_up_concurrency is not None:
+                semaphore_holder.update(scale_up_concurrency)
 
         request_count += 1
 
@@ -1307,6 +1322,14 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "is triggered. For example, --scale-up-to 8 will scale from current "
         "size (e.g., 4) to 8 GPUs.",
     )
+    elastic_group.add_argument(
+        "--scale-up-concurrency",
+        type=int,
+        default=None,
+        help="New max_concurrency to use after scale-up is triggered. "
+        "For example, if you scale from 4 to 8 GPUs, you might want to "
+        "double your concurrency. If not specified, concurrency remains unchanged.",
+    )
 
     sampling_group = parser.add_argument_group("sampling parameters")
     sampling_group.add_argument(
@@ -1462,8 +1485,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                 f"--scale-up-after ({args.scale_up_after}) must be less than "
                 f"--num-prompts ({args.num_prompts})"
             )
-        print(f"[Elastic EP] Will trigger scale-up to {args.scale_up_to} GPUs "
-              f"after {args.scale_up_after} requests")
+        scale_msg = f"[Elastic EP] Will trigger scale-up to {args.scale_up_to} GPUs after {args.scale_up_after} requests"
+        if args.scale_up_concurrency:
+            scale_msg += f", then change concurrency to {args.scale_up_concurrency}"
+        print(scale_msg)
 
     label = args.label
 
@@ -1610,6 +1635,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         scale_up_after=args.scale_up_after,
         scale_up_to=args.scale_up_to,
+        scale_up_concurrency=args.scale_up_concurrency,
     )
 
     # Save config and results to json
