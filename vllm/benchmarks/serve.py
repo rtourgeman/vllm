@@ -583,9 +583,11 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {endpoint_type}") from None
 
     # Reuses connections across requests to reduce TLS handshake overhead.
+    # Use the max of initial and scale-up concurrency for connection pool limit
+    connection_limit = max(max_concurrency or 0, scale_up_concurrency or 0)
     connector = aiohttp.TCPConnector(
-        limit=max_concurrency or 0,
-        limit_per_host=max_concurrency or 0,
+        limit=connection_limit,
+        limit_per_host=connection_limit,
         ttl_dns_cache=300,
         use_dns_cache=True,
         keepalive_timeout=60,
@@ -718,28 +720,42 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # Use a mutable holder for the semaphore so we can update it after scale-up
-    # This allows changing concurrency dynamically
-    class SemaphoreHolder:
+    # Dynamic concurrency limiter that can be updated during the benchmark
+    # Unlike a regular Semaphore, this allows changing the limit on-the-fly
+    class DynamicConcurrencyLimiter:
         def __init__(self, limit: int | None):
-            self.semaphore = (
-                asyncio.Semaphore(limit) if limit else contextlib.nullcontext()
-            )
-            self.current_limit = limit
+            self.limit = limit
+            self.active_count = 0
+            self.condition = asyncio.Condition()
+
+        async def acquire(self):
+            if self.limit is None:
+                return
+            async with self.condition:
+                while self.active_count >= self.limit:
+                    await self.condition.wait()
+                self.active_count += 1
+
+        async def release(self):
+            if self.limit is None:
+                return
+            async with self.condition:
+                self.active_count -= 1
+                self.condition.notify_all()
 
         def update(self, new_limit: int):
-            """Create a new semaphore with updated limit."""
-            self.semaphore = asyncio.Semaphore(new_limit)
-            self.current_limit = new_limit
-            print(f"[Elastic EP] Concurrency updated to {new_limit}")
+            """Update the concurrency limit. Takes effect immediately."""
+            old_limit = self.limit
+            self.limit = new_limit
+            print(f"[Elastic EP] Concurrency updated from {old_limit} to {new_limit}")
+            # Wake up waiting tasks so they can check the new limit
+            asyncio.create_task(self._notify_waiters())
 
-    semaphore_holder = SemaphoreHolder(max_concurrency)
+        async def _notify_waiters(self):
+            async with self.condition:
+                self.condition.notify_all()
 
-    async def limited_request_func(request_func_input, session, pbar):
-        async with semaphore_holder.semaphore:
-            return await request_func(
-                request_func_input=request_func_input, session=session, pbar=pbar
-            )
+    concurrency_limiter = DynamicConcurrencyLimiter(max_concurrency)
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
@@ -755,9 +771,41 @@ async def benchmark(
             }
         )
 
-    # Track request count for elastic scaling trigger
-    request_count = 0
+    # Track completed requests for elastic scaling trigger
+    completed_count = 0
     scale_triggered = False
+    
+    # Callback to trigger scale-up after N requests complete
+    async def check_scale_up_on_completion():
+        nonlocal scale_triggered, completed_count
+        completed_count += 1
+        if (
+            scale_up_after is not None
+            and scale_up_to is not None
+            and not scale_triggered
+            and completed_count >= scale_up_after
+        ):
+            scale_triggered = True
+            print(f"\n[Elastic EP] Triggering scale-up to {scale_up_to} "
+                  f"after {completed_count} requests completed...")
+            asyncio.create_task(
+                trigger_elastic_scale(base_url, scale_up_to, session)
+            )
+            # Update concurrency if specified
+            if scale_up_concurrency is not None:
+                concurrency_limiter.update(scale_up_concurrency)
+
+    async def limited_request_func(request_func_input, session, pbar):
+        await concurrency_limiter.acquire()
+        try:
+            result = await request_func(
+                request_func_input=request_func_input, session=session, pbar=pbar
+            )
+            # Check if we should trigger scale-up after this request completes
+            await check_scale_up_on_completion()
+            return result
+        finally:
+            await concurrency_limiter.release()
 
     async for request, current_request_rate in get_request(
         input_requests,
@@ -767,25 +815,6 @@ async def benchmark(
         ramp_up_start_rps,
         ramp_up_end_rps,
     ):
-        # Check if we should trigger elastic scale-up
-        if (
-            scale_up_after is not None
-            and scale_up_to is not None
-            and not scale_triggered
-            and request_count >= scale_up_after
-        ):
-            scale_triggered = True
-            print(f"\n[Elastic EP] Triggering scale-up to {scale_up_to} "
-                  f"after {request_count} requests...")
-            asyncio.create_task(
-                trigger_elastic_scale(base_url, scale_up_to, session)
-            )
-            # Update concurrency if specified
-            if scale_up_concurrency is not None:
-                semaphore_holder.update(scale_up_concurrency)
-
-        request_count += 1
-
         if ramp_up_strategy is not None:
             current_int_rps = int(current_request_rate)
             if current_int_rps > last_int_rps:
