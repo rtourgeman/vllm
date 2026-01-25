@@ -507,6 +507,9 @@ class OutputProcessor:
         If you need to touch every element of the batch, do it from
         within the loop below.
         """
+        if engine_core_outputs:
+            finished_count = sum(1 for o in engine_core_outputs if o.finish_reason is not None)
+            print(f"[REQ_FLOW_18a] OutputProcessor.process_outputs() | num_outputs={len(engine_core_outputs)} | finished={finished_count}")
 
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []

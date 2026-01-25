@@ -397,6 +397,7 @@ class RayDistributedExecutor(Executor):
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        print(f"[REQ_FLOW_12] RayDistributedExecutor.execute_model() | total_tokens={scheduler_output.total_num_scheduled_tokens} | num_workers={len(self.workers)}")
         if self.scheduler_output is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "

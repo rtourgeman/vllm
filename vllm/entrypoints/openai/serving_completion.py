@@ -95,6 +95,7 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        print(f"[REQ_FLOW_02] OpenAIServingCompletion.create_completion() | model={request.model} | n={request.n} | max_tokens={request.max_tokens}")
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret

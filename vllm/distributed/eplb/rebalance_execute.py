@@ -392,6 +392,9 @@ def rearrange_expert_weights_inplace(
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
     """
+    num_layers = old_global_expert_indices.shape[0]
+    num_physical = old_global_expert_indices.shape[1]
+    print(f"[EPLB_FLOW_04] rearrange_expert_weights_inplace() | layers={num_layers} | physical_experts={num_physical} | ep_rank={ep_group.rank()} | is_profile={is_profile}")
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
             # scale down

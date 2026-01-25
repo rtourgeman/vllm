@@ -254,6 +254,7 @@ class MultiprocExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        print(f"[REQ_FLOW_12] MultiprocExecutor.execute_model() | total_tokens={scheduler_output.total_num_scheduled_tokens} | num_workers={self.world_size}")
         return self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),

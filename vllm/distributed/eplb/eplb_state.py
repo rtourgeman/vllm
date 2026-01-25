@@ -491,6 +491,16 @@ class EplbState:
             - `balancedness`: The ratio of average load to maximum load.
         """
         ep_group = get_ep_group().device_group
+        
+        # Log first step call to show EPLB is receiving data from MoE layers
+        if not hasattr(self, '_step_entry_logged'):
+            # Get total load collected from MoE layers this step
+            total_load = 0
+            for eplb_model_state in self.model_states.values():
+                total_load += eplb_model_state.expert_load_pass.sum().item()
+            print(f"[EPLB_FLOW_01a] EplbState.step() ENTRY | is_dummy={is_dummy} | total_routing_decisions_from_MoE={int(total_load)}")
+            self._step_entry_logged = True
+        
         if is_profile:
             self.rearrange(is_profile=True)
             return
@@ -544,6 +554,13 @@ class EplbState:
         # Update the expert load sliding window
         if not is_dummy:
             for eplb_model_state in self.model_states.values():
+                # Log first window save to show EPLB storing MoE's data
+                if not hasattr(self, '_window_save_logged'):
+                    load_this_step = eplb_model_state.expert_load_pass.sum().item()
+                    print(f"[EPLB_FLOW_01b] Saving MoE load to window | window_slot={self.expert_load_window_step} | load_this_step={int(load_this_step)}")
+                    print(f"[EPLB_FLOW_01c] Resetting expert_load_pass for next step")
+                    self._window_save_logged = True
+                
                 eplb_model_state.expert_load_window[self.expert_load_window_step] = (
                     eplb_model_state.expert_load_pass.clone()
                 )
@@ -558,6 +575,19 @@ class EplbState:
         # rearrangement step and perform rearrangement to ensure all ranks are
         # performing collective communication.
         self.expert_rearrangement_step += 1
+        # Log every 100 steps to avoid log spam, or first step
+        if self.expert_rearrangement_step == 1 or self.expert_rearrangement_step % 100 == 0:
+            # Show sample of expert load from first model state
+            load_sample = "N/A"
+            if self.model_states:
+                first_model_state = next(iter(self.model_states.values()))
+                if hasattr(first_model_state, 'expert_load_window') and first_model_state.expert_load_window is not None:
+                    # Show sum and top 5 loaded experts from layer 0
+                    layer0_load = first_model_state.expert_load_window[0]
+                    total_tokens = layer0_load.sum().item()
+                    top5_vals, top5_idx = layer0_load.topk(min(5, layer0_load.shape[0]))
+                    load_sample = f"total_tokens_layer0={int(total_tokens)} top5_experts={list(zip(top5_idx.tolist(), top5_vals.tolist()))}"
+            print(f"[EPLB_FLOW_01] EplbState.step() | rearrangement_step={self.expert_rearrangement_step}/{self.expert_rearrangement_step_interval} | window_step={self.expert_load_window_step}/{self.expert_load_window_size} | {load_sample}")
 
         if self.is_async:
             for eplb_model_state in self.model_states.values():
@@ -619,6 +649,7 @@ class EplbState:
             rank_mapping (dict[int, int] | None): The rank mapping
                 when scaling is done in EEP.
         """
+        print(f"[EPLB_FLOW_02] EplbState.rearrange() starting | is_profile={is_profile} | is_async={self.is_async}")
 
         ep_group = get_ep_group().device_group
         ep_rank = ep_group.rank()

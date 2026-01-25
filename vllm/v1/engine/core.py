@@ -361,7 +361,9 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+        print(f"[REQ_FLOW_10] EngineCore.step() - calling scheduler.schedule()")
         scheduler_output = self.scheduler.schedule()
+        print(f"[REQ_FLOW_11] EngineCore.step() - executing model | total_tokens={scheduler_output.total_num_scheduled_tokens}")
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with self.log_error_detail(scheduler_output):
@@ -979,6 +981,7 @@ class EngineCoreProc(EngineCore):
 
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
+            print(f"[REQ_FLOW_06] EngineCore dispatching ADD to scheduler | request_id={req.request_id}")
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
@@ -1103,6 +1106,7 @@ class EngineCoreProc(EngineCore):
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+                        print(f"[REQ_FLOW_05] EngineCore received ADD request via ZMQ | request_id={req.request_id}")
                         try:
                             request = self.preprocess_add_request(req)
                         except Exception:

@@ -2467,6 +2467,10 @@ class GPUModelRunner(
         assert self.eplb_state is not None
         model = self.get_model()
         assert is_mixture_of_experts(model)
+        # Log EPLB step call from model runner
+        if not hasattr(self, '_eplb_step_logged'):
+            print(f"[EPLB_FLOW_00] GPUModelRunner.eplb_step() called | is_dummy={is_dummy} | is_profile={is_profile}")
+            self._eplb_step_logged = True
         self.eplb_state.step(
             is_dummy,
             is_profile,
@@ -3056,6 +3060,7 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        print(f"[REQ_FLOW_14] GPUModelRunner.execute_model() | total_tokens={scheduler_output.total_num_scheduled_tokens}")
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -3237,6 +3242,7 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            print(f"[REQ_FLOW_15] GPUModelRunner._model_forward() starting | num_tokens={num_tokens_padded}")
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -3244,6 +3250,7 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+            print(f"[REQ_FLOW_16] GPUModelRunner._model_forward() complete")
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:

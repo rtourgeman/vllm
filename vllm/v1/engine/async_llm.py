@@ -386,6 +386,8 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        print(f"[REQ_FLOW_03] AsyncLLM.generate() called | request_id={request_id}")
+
         if (
             self.vllm_config.cache_config.kv_sharing_fast_prefill
             and sampling_params.prompt_logprobs
@@ -428,6 +430,7 @@ class AsyncLLM(EngineClient):
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
             )
+            print(f"[REQ_FLOW_04] Request added to EngineCore | request_id={request_id}")
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
@@ -440,6 +443,8 @@ class AsyncLLM(EngineClient):
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 finished = out.finished
+                if finished:
+                    print(f"[REQ_FLOW_19] Request complete | request_id={request_id}")
                 assert isinstance(out, RequestOutput)
                 yield out
 
@@ -492,6 +497,8 @@ class AsyncLLM(EngineClient):
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
+                    if num_outputs > 0:
+                        print(f"[REQ_FLOW_18] AsyncLLM output_handler received | num_outputs={num_outputs}")
 
                     iteration_stats = (
                         IterationStats() if (log_stats and num_outputs) else None

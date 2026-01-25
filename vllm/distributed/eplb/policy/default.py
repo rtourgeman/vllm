@@ -238,6 +238,7 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
                 physical replicas for each logical expert
         """
         num_layers, num_logical_experts = weight.shape
+        print(f"[EPLB_FLOW_03] DefaultEplbPolicy.rebalance_experts() | layers={num_layers} | logical_experts={num_logical_experts} | physical_replicas={num_replicas} | groups={num_groups} | nodes={num_nodes} | ranks={num_ranks}")
         weight = weight.float()
         if num_groups % num_nodes == 0:
             # use hierarchical load-balance policy

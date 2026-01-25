@@ -1029,6 +1029,7 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async("get_supported_tasks")
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        print(f"[REQ_FLOW_04a] AsyncMPClient sending request via ZMQ | request_id={request.request_id}")
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
@@ -1257,6 +1258,7 @@ class DPAsyncMPClient(AsyncMPClient):
         request.client_index = self.client_index
 
         chosen_engine = self.get_core_engine_for_request(request)
+        print(f"[REQ_FLOW_04b] DPLBAsyncMPClient sending request via ZMQ | request_id={request.request_id} | dp_rank={chosen_engine}")
         to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
         if not self.engines_running:
             # Notify coordinator that we're sending a request

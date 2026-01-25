@@ -236,6 +236,8 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
+        print(f"[REQ_FLOW_08] Scheduler.schedule() | waiting={len(self.waiting)} | running={len(self.running)}")
+
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -760,6 +762,7 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        print(f"[REQ_FLOW_09] Scheduler batch ready | num_new_reqs={len(scheduler_output.scheduled_new_reqs)} | num_cached_reqs={len(scheduler_output.scheduled_cached_reqs.req_ids)} | total_tokens={scheduler_output.total_num_scheduled_tokens}")
         return scheduler_output
 
     def _preempt_request(
@@ -1063,6 +1066,7 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        print(f"[REQ_FLOW_17] Scheduler.update_from_output() | num_requests={len(scheduler_output.num_scheduled_tokens)}")
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -1355,6 +1359,7 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        print(f"[REQ_FLOW_07] Scheduler.add_request() | request_id={request.request_id} | num_tokens={request.num_tokens}")
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
         if self.log_stats:

@@ -1538,6 +1538,10 @@ class FusedMoE(CustomOp):
             fused_topk,
             fused_topk_bias,
         )
+        # Log only first call per layer to avoid excessive output
+        if not hasattr(self, '_moe_logged'):
+            print(f"[MOE_FLOW_01] FusedMoE.select_experts() | layer={self.layer_name} | num_tokens={hidden_states.shape[0]} | top_k={self.top_k} | num_experts={self.global_num_experts} | enable_eplb={self.enable_eplb}")
+            self._moe_logged = True
 
         if self.enable_eplb:
             if self.quant_method.supports_eplb:
@@ -1625,12 +1629,31 @@ class FusedMoE(CustomOp):
             )
 
         if self.enable_eplb:
+            # EPLB: map logical expert IDs to physical and record load
+            num_tokens = topk_ids.shape[0]
+            num_routing_decisions = topk_ids.numel()  # num_tokens * top_k
+            if not hasattr(self, '_eplb_logged'):
+                print(f"[MOE_FLOW_03] MoE calling EPLB | layer={self.layer_name} | num_tokens={num_tokens} | top_k={self.top_k} | routing_decisions={num_routing_decisions}")
+                print(f"[MOE_FLOW_03a]   -> topk_ids BEFORE (logical): shape={topk_ids.shape}, sample={topk_ids[0].tolist() if num_tokens > 0 else 'empty'}")
+                self._eplb_logged = True
+            
+            # ═══════════════════════════════════════════════════════════════
+            # EPLB FUNCTION CALL - maps logical→physical, records load stats
+            # ═══════════════════════════════════════════════════════════════
             topk_ids = eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
             )
+            # ═══════════════════════════════════════════════════════════════
+            # BACK IN MoE LAYER - EPLB function returned
+            # ═══════════════════════════════════════════════════════════════
+            
+            if not hasattr(self, '_eplb_return_logged'):
+                print(f"[MOE_FLOW_03b]   <- topk_ids AFTER (physical): shape={topk_ids.shape}, sample={topk_ids[0].tolist() if num_tokens > 0 else 'empty'}")
+                print(f"[MOE_FLOW_03c]   <- expert_load_view updated: sum={self.expert_load_view.sum().item()}")
+                self._eplb_return_logged = True
 
         if (indices_type is not None) and topk_ids.dtype != indices_type:
             topk_ids = topk_ids.to(dtype=indices_type)
@@ -1854,6 +1877,10 @@ class FusedMoE(CustomOp):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
+        # Log first forward per layer
+        if not hasattr(self, '_forward_logged'):
+            print(f"[MOE_FLOW_02] FusedMoE.forward_impl() | layer={self.layer_name} | tokens={hidden_states.shape[0]} | hidden_size={hidden_states.shape[-1]} | use_ep={self.use_ep} | ep_size={self.ep_size}")
+            self._forward_logged = True
 
         self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
@@ -1996,11 +2023,19 @@ class FusedMoE(CustomOp):
                 return states
 
             if self.shared_experts is not None:
+                # Log MoE layer completion (first time only)
+                if not hasattr(self, '_moe_complete_logged'):
+                    print(f"[MOE_FLOW_04] MoE layer complete | layer={self.layer_name} | (with shared experts)")
+                    self._moe_complete_logged = True
                 return (
                     final_hidden_states[0],
                     combine_output(final_hidden_states[1]),
                 )
             else:
+                # Log MoE layer completion (first time only)
+                if not hasattr(self, '_moe_complete_logged'):
+                    print(f"[MOE_FLOW_04] MoE layer complete | layer={self.layer_name} | output ready for next layer")
+                    self._moe_complete_logged = True
                 return combine_output(final_hidden_states)
 
     @classmethod
