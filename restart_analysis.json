@@ -1,0 +1,30 @@
+{
+  "summary": {
+    "log_file": "restart.log",
+    "total_probes": 3266,
+    "success_count": 178,
+    "failure_count": 3088,
+    "success_rate_percent": 5.450091855480711,
+    "total_measurement_duration_ms": 163670,
+    "first_probe_time": "2026-01-26T06:52:53.028",
+    "last_probe_time": "2026-01-26T06:55:36.698"
+  },
+  "response_times_ms": {
+    "avg": 0.67,
+    "min": 0.51,
+    "max": 3.26
+  },
+  "downtime_windows": [
+    {
+      "window_number": 1,
+      "start_ms": 1769439176437,
+      "end_ms": 1769439331233,
+      "duration_ms": 154796,
+      "duration_seconds": 154.796,
+      "failure_count": 3088
+    }
+  ],
+  "total_downtime_ms": 154796,
+  "total_downtime_seconds": 154.796,
+  "downtime_window_count": 1
+}

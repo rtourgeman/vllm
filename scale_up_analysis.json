@@ -1,0 +1,30 @@
+{
+  "summary": {
+    "log_file": "scale_up.log",
+    "total_probes": 2063,
+    "success_count": 405,
+    "failure_count": 1658,
+    "success_rate_percent": 19.631604459524965,
+    "total_measurement_duration_ms": 103397,
+    "first_probe_time": "2026-01-26T05:57:49.005",
+    "last_probe_time": "2026-01-26T05:59:32.402"
+  },
+  "response_times_ms": {
+    "avg": 0.63,
+    "min": 0.47,
+    "max": 2.96
+  },
+  "downtime_windows": [
+    {
+      "window_number": 1,
+      "start_ms": 1769435871663,
+      "end_ms": 1769435954804,
+      "duration_ms": 83141,
+      "duration_seconds": 83.141,
+      "failure_count": 1658
+    }
+  ],
+  "total_downtime_ms": 83141,
+  "total_downtime_seconds": 83.141,
+  "downtime_window_count": 1
+}
