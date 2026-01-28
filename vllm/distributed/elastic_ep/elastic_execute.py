@@ -83,11 +83,10 @@ def batch_transfer_weights(
     if dp_elastic_manager is not None:
         # Register buffers and sync metadata before transfer
         dp_elastic_manager.register_memory(all_params)
-        dp_group = get_dp_group()
-        dp_elastic_manager.sync_metadata(
+        dp_elastic_manager.sync_metadata_p2p(
             comm_group=dp_group.tcp_store_group,
             my_rank_in_group=dp_group.rank_in_group,
-            peer_ranks=list(range(dp_group.world_size))
+            peer_rank=peer_rank,
         )
         dp_elastic_manager.batch_isend_irecv(p2p_ops)
     else:

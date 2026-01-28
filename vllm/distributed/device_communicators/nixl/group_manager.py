@@ -138,7 +138,34 @@ class NixlGroupManager:
             peer_metadata = metadata_list[rank_in_group]
             logger.debug(f"[NIXL] Loading metadata for {peer_name}")
             self.agent.add_remote_agent(peer_metadata)
-            
+
+    def sync_metadata_p2p(
+        self,
+        comm_group: StatelessProcessGroup,
+        my_rank_in_group: int,
+        peer_rank: int,
+    ):
+        """
+        Sync agent metadata with a single peer using point-to-point exchange.
+        Unlike sync_metadata which uses all_gather (collective), this only
+        exchanges metadata between my_rank and peer_rank.
+        """
+        peer_name = f"{self.group_prefix}_rank_{peer_rank}"
+        
+        my_metadata = self.agent.get_agent_metadata()
+        logger.debug(f"[NIXL] P2P metadata sync: my_rank={my_rank_in_group}, peer_rank={peer_rank}")
+        
+        # Both sides send their metadata to each other
+        comm_group.send_obj(my_metadata, dst=peer_rank)
+        
+        # Both sides receive metadata from each other
+        peer_metadata = comm_group.recv_obj(src=peer_rank)
+        
+        # Add/update remote agent with fresh metadata
+        logger.debug(f"[NIXL] Adding/updating peer {peer_name} from P2P sync")
+        self.agent.add_remote_agent(peer_metadata)
+        self.known_peers[peer_name] = peer_metadata
+
     def batch_isend_irecv(self, p2p_ops):
         """Convert P2POp operations to NIXL isend/irecv calls and block until completion."""
         import torch
