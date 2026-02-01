@@ -2,185 +2,215 @@
 #===============================================================================
 # vllm_deepseek_v3.slurm
 # Slurm batch script for running vLLM with DeepSeek V3 on 3 nodes × 8 GPUs
+# Uses expert parallelism with NIXL all2all backend
 #===============================================================================
 
 #-------------------------------------------------------------------------------
-# SBATCH Directives - Resource Allocation
+# SBATCH Directives
 #-------------------------------------------------------------------------------
-
-# Job identification
 #SBATCH --job-name=vllm-deepseek-v3
 #SBATCH --comment="vLLM DeepSeek V3 multi-node inference"
-
-# Resource allocation
-#SBATCH --nodes=3                      # 3 nodes for full DeepSeek V3
-#SBATCH --ntasks-per-node=1            # 1 task per node (vLLM handles GPU distribution internally)
-#SBATCH --gpus-per-node=8              # 8 H100 GPUs per node (24 total)
-#SBATCH --exclusive                    # Exclusive node access for consistent performance
-
-# Time and queue
-#SBATCH --time=04:00:00                # 4 hours wall time (adjust as needed)
-#SBATCH --partition=batch              # Use batch partition (interactive only allows ≤2 nodes)
+#SBATCH --nodes=3
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=8
+#SBATCH --exclusive
+#SBATCH --time=04:00:00
+#SBATCH --partition=batch
 #SBATCH --account=coreai_comparch_trtllm
-
-# Output logs
-#SBATCH --output=logs/vllm_%j.out      # stdout (%j = job ID)
-#SBATCH --error=logs/vllm_%j.err       # stderr
+#SBATCH --output=logs/vllm_%j.out
+#SBATCH --error=logs/vllm_%j.err
 
 #-------------------------------------------------------------------------------
-# Configuration Variables - EDIT THESE
+# Configuration - EDIT THESE AS NEEDED
 #-------------------------------------------------------------------------------
 
-# Container image (your existing image)
+# Container
 CONTAINER_IMAGE="/lustre/fsw/coreai_comparch_trtllm/rtourgeman/elastic-ep/vllm/27_1_26_deep_seek_perf_nixl_weight_transfer_v4.sqsh"
 
-# Container mounts - ADD YOUR MOUNTS HERE
-# Format: "host_path:container_path,host_path2:container_path2,..."
-CONTAINER_MOUNTS="/lustre/fsw/coreai_comparch_trtllm:/lustre/fsw/coreai_comparch_trtllm,/swgwork/rtourgeman:/swgwork/rtourgeman"
+CONTAINER_MOUNTS="/etc/slurm,\
+/usr/bin/srun,\
+/usr/bin/sinfo,\
+/usr/bin/scontrol,\
+/usr/bin/squeue,\
+/usr/lib/x86_64-linux-gnu/slurm,\
+/lib/x86_64-linux-gnu/libmunge.so.2,\
+/run/munge,\
+/lustre/fsw/network_research_advdev/${USER}:/workspace/external,\
+/lustre/fsw/network_research_advdev/bblack/gdaki/linux-headers-5.15.0-88-generic:/lib/modules/5.15.0-88-generic/build,\
+/lustre/fsw/network_research_advdev/bblack/gdaki/linux-headers-5.15.0-88-generic:/usr/src/linux-headers-5.15.0-88-generic,\
+/lustre/fsw/coreai_comparch_trtllm/llm_data/llm-models/:/workspace/llm_models"
 
-# Model configuration
-MODEL_PATH="/lustre/fsw/coreai_comparch_trtllm/models/DeepSeek-V3"  # Adjust to your model path
-TENSOR_PARALLEL_SIZE=8     # TP=8: parallelize across 8 GPUs within each node
-PIPELINE_PARALLEL_SIZE=3   # PP=3: pipeline across 3 nodes
+# Model - UPDATE THIS PATH for full DeepSeek V3
+MODEL_NAME="/workspace/llm_models/DeepSeek-V3/fp8/"  # <-- ADJUST PATH
 
 # vLLM server settings
 HOST="0.0.0.0"
-PORT=8000
-MAX_MODEL_LEN=8192         # Adjust based on your memory/needs
+PORT=8006
+
+# Parallelism settings for 3 nodes × 8 GPUs = 24 GPUs
+DATA_PARALLEL_SIZE=24          # Total GPUs across all nodes
+DATA_PARALLEL_SIZE_LOCAL=8     # GPUs per node
+
+# NIXL/Expert parallelism settings
+VLLM_NIXL_EP_MAX_NUM_RANKS=24  # Must match DATA_PARALLEL_SIZE
+
+# EPLB (Expert Parallelism Load Balancing) settings
+NUM_REDUNDANT_EXPERTS=8
+EPLB_WINDOW_SIZE=1000
+EPLB_STEP_INTERVAL=3000
+
+# Model settings - may need adjustment for full V3
+MAX_MODEL_LEN=4096
+GPU_MEMORY_UTILIZATION=0.9
+
+# Ray settings
+RAY_PORT=6379
 
 #-------------------------------------------------------------------------------
-# Script Setup
+# Setup
 #-------------------------------------------------------------------------------
-
 set -Eeuo pipefail
-
-# Create logs directory if it doesn't exist
 mkdir -p logs
 
 echo "============================================================"
-echo "vLLM DeepSeek V3 Multi-Node Job"
+echo "vLLM DeepSeek V3 - Multi-Node Expert Parallel"
 echo "============================================================"
-echo "Job ID:        ${SLURM_JOB_ID}"
-echo "Job Name:      ${SLURM_JOB_NAME}"
-echo "Nodes:         ${SLURM_JOB_NUM_NODES}"
-echo "GPUs/Node:     8"
-echo "Total GPUs:    $((SLURM_JOB_NUM_NODES * 8))"
-echo "Partition:     ${SLURM_JOB_PARTITION}"
-echo "Node List:     ${SLURM_JOB_NODELIST}"
+echo "Job ID:           ${SLURM_JOB_ID}"
+echo "Nodes:            ${SLURM_JOB_NUM_NODES}"
+echo "Total GPUs:       $((SLURM_JOB_NUM_NODES * 8))"
+echo "Node List:        ${SLURM_JOB_NODELIST}"
+echo "DATA_PARALLEL:    ${DATA_PARALLEL_SIZE}"
 echo "============================================================"
 
 #-------------------------------------------------------------------------------
-# Distributed Environment Setup
+# Get head node info
 #-------------------------------------------------------------------------------
-
-# Get the first node as the head/master node
-# SLURM_NODELIST can be in formats like "node[001-003]" or "node001,node002,node003"
 HEAD_NODE=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
-HEAD_NODE_IP=$(srun --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname -i)
+HEAD_NODE_IP=$(srun --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname -I | awk '{print $1}')
 
-# Ray configuration for vLLM distributed inference
-RAY_PORT=6379              # Ray cluster port
-DASHBOARD_PORT=8265        # Ray dashboard port
-
-echo ""
-echo "Distributed Configuration:"
-echo "  Head Node:       ${HEAD_NODE}"
-echo "  Head Node IP:    ${HEAD_NODE_IP}"
-echo "  Ray Port:        ${RAY_PORT}"
-echo "  TP Size:         ${TENSOR_PARALLEL_SIZE}"
-echo "  PP Size:         ${PIPELINE_PARALLEL_SIZE}"
+echo "Head Node:        ${HEAD_NODE}"
+echo "Head Node IP:     ${HEAD_NODE_IP}"
 echo "============================================================"
 
 #-------------------------------------------------------------------------------
-# Launch vLLM with Ray Distributed Backend
+# Step 1: Start Ray head on first node
 #-------------------------------------------------------------------------------
-
-# vLLM uses Ray for multi-node distributed inference.
-# We launch the head node first, then worker nodes join the Ray cluster.
-
 echo ""
-echo "Starting Ray cluster and vLLM..."
-echo ""
+echo "[Step 1] Starting Ray head on ${HEAD_NODE}..."
 
-# Use srun to launch across all nodes
-# Each node will:
-#   1. Start Ray (head on first node, workers on others)
-#   2. The head node runs the vLLM server
-
-srun \
-    --nodes=${SLURM_JOB_NUM_NODES} \
-    --ntasks-per-node=1 \
-    --gpus-per-node=8 \
+srun --nodes=1 --ntasks=1 -w "${HEAD_NODE}" \
     --container-image="${CONTAINER_IMAGE}" \
     --container-mounts="${CONTAINER_MOUNTS}" \
-    --mpi=pmix \
-    bash -c '
-        # Determine if this is the head node
-        HEAD_NODE_IP='"${HEAD_NODE_IP}"'
-        MY_IP=$(hostname -i)
+    --output=logs/ray_head_${SLURM_JOB_ID}.out \
+    --error=logs/ray_head_${SLURM_JOB_ID}.err \
+    bash -c "
+        export LD_LIBRARY_PATH=/workspace/nixl/install/lib/x86_64-linux-gnu:\$LD_LIBRARY_PATH
+        export PYTHONPATH=/workspace/nixl/install/lib/python3/dist-packages
+        export NIXL_PLUGIN_DIR=/workspace/nixl/install/lib/x86_64-linux-gnu/plugins
         
-        # Export environment for vLLM/Ray
-        export RAY_ADDRESS="${HEAD_NODE_IP}:'"${RAY_PORT}"'"
-        export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-        export NCCL_DEBUG=WARN
+        cd /workspace/vllm
+        ray start --head --port=${RAY_PORT} --node-ip-address=${HEAD_NODE_IP} --block
+    " &
+
+RAY_HEAD_PID=$!
+echo "Ray head starting in background (PID: ${RAY_HEAD_PID})"
+
+# Wait for Ray head to initialize
+sleep 15
+
+#-------------------------------------------------------------------------------
+# Step 2: Start Ray workers on remaining nodes
+#-------------------------------------------------------------------------------
+WORKER_NODES=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | tail -n +2)
+
+if [[ -n "${WORKER_NODES}" ]]; then
+    echo ""
+    echo "[Step 2] Starting Ray workers on: ${WORKER_NODES}"
+    
+    for WORKER in ${WORKER_NODES}; do
+        echo "  Starting worker on ${WORKER}..."
+        srun --nodes=1 --ntasks=1 -w "${WORKER}" \
+            --container-image="${CONTAINER_IMAGE}" \
+            --container-mounts="${CONTAINER_MOUNTS}" \
+            --output=logs/ray_worker_${WORKER}_${SLURM_JOB_ID}.out \
+            --error=logs/ray_worker_${WORKER}_${SLURM_JOB_ID}.err \
+            bash -c "
+                export LD_LIBRARY_PATH=/workspace/nixl/install/lib/x86_64-linux-gnu:\$LD_LIBRARY_PATH
+                export PYTHONPATH=/workspace/nixl/install/lib/python3/dist-packages
+                export NIXL_PLUGIN_DIR=/workspace/nixl/install/lib/x86_64-linux-gnu/plugins
+                
+                cd /workspace/vllm
+                ray start --address=${HEAD_NODE_IP}:${RAY_PORT} --block
+            " &
+    done
+    
+    # Wait for workers to join
+    echo "Waiting for workers to join Ray cluster..."
+    sleep 20
+fi
+
+#-------------------------------------------------------------------------------
+# Step 3: Launch vLLM server on head node
+#-------------------------------------------------------------------------------
+echo ""
+echo "[Step 3] Launching vLLM server on ${HEAD_NODE}..."
+echo "  Model: ${MODEL_NAME}"
+echo "  Data Parallel Size: ${DATA_PARALLEL_SIZE}"
+echo "  Data Parallel Size Local: ${DATA_PARALLEL_SIZE_LOCAL}"
+echo ""
+
+srun --nodes=1 --ntasks=1 -w "${HEAD_NODE}" \
+    --container-image="${CONTAINER_IMAGE}" \
+    --container-mounts="${CONTAINER_MOUNTS}" \
+    --output=logs/vllm_server_${SLURM_JOB_ID}.out \
+    --error=logs/vllm_server_${SLURM_JOB_ID}.err \
+    bash -c "
+        # NIXL environment
+        export LD_LIBRARY_PATH=/workspace/nixl/install/lib/x86_64-linux-gnu:\$LD_LIBRARY_PATH
+        export PYTHONPATH=/workspace/nixl/install/lib/python3/dist-packages
+        export NIXL_PLUGIN_DIR=/workspace/nixl/install/lib/x86_64-linux-gnu/plugins
         
-        # Source environment setup if available
-        if [[ -f /workspace/set_env.sh ]]; then
-            source /workspace/set_env.sh
-        fi
+        # DeepGemm/CUDA
+        export DG_JIT_NVCC_COMPILER=/usr/local/cuda-12.9/bin/nvcc
+        export CUDA_HOME='/usr/local/cuda-12.9'
         
-        echo "[Node $(hostname)] IP=${MY_IP}, HEAD_NODE_IP=${HEAD_NODE_IP}"
+        # vLLM settings
+        export VLLM_USE_V1=1
+        export VLLM_USE_DEEP_GEMM=1
+        export VLLM_NIXL_EP_MAX_NUM_RANKS=${VLLM_NIXL_EP_MAX_NUM_RANKS}
+        export VLLM_NIXL_EP_UCX_IB_DEVICES='mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11'
+        export VLLM_NIXL_EP_UCX_TCP_DEVICES='ibp154s0,ibp192s0,ibp206s0,ibp220s0,ibp94s0'
+        export UCX_CUDA_COPY_DMABUF=n
         
-        if [[ "${MY_IP}" == "${HEAD_NODE_IP}" ]]; then
-            echo "[HEAD NODE] Starting Ray head and vLLM server..."
-            
-            # Start Ray head node
-            ray start --head --port='"${RAY_PORT}"' \
-                --dashboard-host=0.0.0.0 \
-                --dashboard-port='"${DASHBOARD_PORT}"' \
-                --num-gpus=8 \
-                --block &
-            
-            # Wait for Ray to initialize
-            sleep 10
-            
-            # Wait for all worker nodes to join
-            EXPECTED_GPUS=$(('"${SLURM_JOB_NUM_NODES}"' * 8))
-            echo "Waiting for ${EXPECTED_GPUS} GPUs to be available in Ray cluster..."
-            
-            for i in {1..60}; do
-                AVAILABLE_GPUS=$(ray status 2>/dev/null | grep -oP "GPU:\s+\K[0-9]+" | head -1 || echo "0")
-                echo "  Attempt ${i}: ${AVAILABLE_GPUS}/${EXPECTED_GPUS} GPUs available"
-                if [[ "${AVAILABLE_GPUS}" -ge "${EXPECTED_GPUS}" ]]; then
-                    echo "All GPUs available!"
-                    break
-                fi
-                sleep 5
-            done
-            
-            # Launch vLLM API server
-            echo "Launching vLLM server..."
-            python -m vllm.entrypoints.openai.api_server \
-                --model '"${MODEL_PATH}"' \
-                --tensor-parallel-size '"${TENSOR_PARALLEL_SIZE}"' \
-                --pipeline-parallel-size '"${PIPELINE_PARALLEL_SIZE}"' \
-                --host '"${HOST}"' \
-                --port '"${PORT}"' \
-                --max-model-len '"${MAX_MODEL_LEN}"' \
-                --trust-remote-code \
-                --distributed-executor-backend ray
-        else
-            echo "[WORKER NODE] Joining Ray cluster at ${HEAD_NODE_IP}:'"${RAY_PORT}"'..."
-            
-            # Give head node time to start
-            sleep 15
-            
-            # Join the Ray cluster
-            ray start --address="${HEAD_NODE_IP}:'"${RAY_PORT}"'" \
-                --num-gpus=8 \
-                --block
-        fi
-    '
+        cd /workspace/vllm
+        
+        LEADER_ADDRESS=\$(hostname -I | awk '{print \$1}')
+        
+        echo 'Starting vLLM serve...'
+        echo \"LEADER_ADDRESS: \${LEADER_ADDRESS}\"
+        
+        vllm serve ${MODEL_NAME} --trust-remote-code \\
+            --disable-log-requests \\
+            --host ${HOST} \\
+            --port ${PORT} \\
+            --tensor-parallel-size 1 \\
+            --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \\
+            --max-model-len ${MAX_MODEL_LEN} \\
+            --no-enable-prefix-caching \\
+            --enable-expert-parallel \\
+            --enable-elastic-ep \\
+            --enable-eplb \\
+            --eplb-config.num_redundant_experts ${NUM_REDUNDANT_EXPERTS} \\
+            --eplb-config.window_size ${EPLB_WINDOW_SIZE} \\
+            --eplb-config.step_interval ${EPLB_STEP_INTERVAL} \\
+            --data-parallel-backend ray \\
+            --data-parallel-size ${DATA_PARALLEL_SIZE} \\
+            --data-parallel-size-local ${DATA_PARALLEL_SIZE_LOCAL} \\
+            --data-parallel-address \${LEADER_ADDRESS} \\
+            --data-parallel-rpc-port 9876 \\
+            --data-parallel-start-rank 0 \\
+            --all2all-backend nixl_ep
+    "
 
 echo ""
 echo "Job completed."
