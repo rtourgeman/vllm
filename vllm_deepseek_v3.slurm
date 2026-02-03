@@ -179,28 +179,47 @@ srun --nodes=${SLURM_JOB_NUM_NODES} \
             # Launch vLLM server
             echo "[HEAD NODE] Starting vLLM server..."
             LEADER_ADDRESS=$(hostname -I | awk "{print \$1}")
-            
-            vllm serve '"${MODEL_NAME}"' --trust-remote-code \
-                --disable-log-requests \
-                --host '"${HOST}"' \
-                --port '"${PORT}"' \
-                --tensor-parallel-size 1 \
-                --gpu-memory-utilization '"${GPU_MEMORY_UTILIZATION}"' \
-                --max-model-len '"${MAX_MODEL_LEN}"' \
-                --no-enable-prefix-caching \
-                --enable-expert-parallel \
-                --enable-elastic-ep \
-                --enable-eplb \
-                --eplb-config.num_redundant_experts '"${NUM_REDUNDANT_EXPERTS}"' \
-                --eplb-config.window_size '"${EPLB_WINDOW_SIZE}"' \
-                --eplb-config.step_interval '"${EPLB_STEP_INTERVAL}"' \
-                --data-parallel-backend ray \
-                --data-parallel-size '"${DATA_PARALLEL_SIZE}"' \
-                --data-parallel-size-local '"${DATA_PARALLEL_SIZE_LOCAL}"' \
-                --data-parallel-address ${LEADER_ADDRESS} \
-                --data-parallel-rpc-port 9876 \
-                --data-parallel-start-rank 0 \
-                --all2all-backend nixl_ep
+
+            RESTART_AFTER_SECONDS=900  # 10 minutes
+
+            start_vllm_serve() {
+                vllm serve '"${MODEL_NAME}"' --trust-remote-code \
+                    --disable-log-requests \
+                    --host '"${HOST}"' \
+                    --port '"${PORT}"' \
+                    --tensor-parallel-size 1 \
+                    --gpu-memory-utilization '"${GPU_MEMORY_UTILIZATION}"' \
+                    --max-model-len '"${MAX_MODEL_LEN}"' \
+                    --no-enable-prefix-caching \
+                    --enable-expert-parallel \
+                    --enable-elastic-ep \
+                    --enable-eplb \
+                    --eplb-config.num_redundant_experts '"${NUM_REDUNDANT_EXPERTS}"' \
+                    --eplb-config.window_size '"${EPLB_WINDOW_SIZE}"' \
+                    --eplb-config.step_interval '"${EPLB_STEP_INTERVAL}"' \
+                    --data-parallel-backend ray \
+                    --data-parallel-size '"${DATA_PARALLEL_SIZE}"' \
+                    --data-parallel-size-local '"${DATA_PARALLEL_SIZE_LOCAL}"' \
+                    --data-parallel-address ${LEADER_ADDRESS} \
+                    --data-parallel-rpc-port 9876 \
+                    --data-parallel-start-rank 0 \
+                    --all2all-backend nixl_ep
+            }
+
+            echo "[HEAD NODE] vLLM will be restarted after ${RESTART_AFTER_SECONDS}s..."
+            start_vllm_serve &
+            VLLM_PID=$!
+
+            # Wait 10 minutes, then restart once.
+            sleep "${RESTART_AFTER_SECONDS}" || true
+            echo "[HEAD NODE] Stopping vLLM (pid=${VLLM_PID}) for planned restart..."
+            kill -INT "${VLLM_PID}" 2>/dev/null || true
+            wait "${VLLM_PID}" || true
+            echo "[HEAD NODE] vLLM stopped. Restarting..."
+            sleep 5
+
+            # Replace this bash with the restarted vLLM process (keeps job alive).
+            exec start_vllm_serve
         else
             echo "[WORKER NODE ${MY_HOSTNAME}] Waiting for Ray head to start..."
             sleep 15
