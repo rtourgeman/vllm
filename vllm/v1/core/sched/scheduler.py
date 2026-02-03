@@ -225,6 +225,25 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
     def schedule(self) -> SchedulerOutput:
+        # ======================================================================
+        # PACKET FLOW - STEP 7: SCHEDULER CREATES BATCH
+        # ======================================================================
+        # FROM: core.py -> EngineCore.step() main loop
+        # TO:   gpu_worker.py -> Worker.execute_model()
+        #
+        # The scheduler creates a BATCH of requests to process together.
+        # This is where vLLM's efficiency comes from - batching multiple
+        # requests improves GPU utilization.
+        #
+        # The scheduler decides:
+        #   - Which waiting requests can start (have enough KV cache space)
+        #   - Which running requests continue
+        #   - How many tokens each request processes this step
+        #
+        # Output: SchedulerOutput containing the batch to execute
+        #
+        # NEXT STEP: EngineCore.step() sends batch to executor
+        # ======================================================================
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -1066,6 +1085,20 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # ======================================================================
+        # PACKET FLOW - STEP 14: PROCESS MODEL OUTPUT
+        # ======================================================================
+        # FROM: EngineCore.step() after model execution
+        # TO:   Back to API server via ZMQ
+        #
+        # The model has produced output tokens! Now we:
+        #   1. Extract sampled token IDs from model output
+        #   2. Update request state (add new tokens to output)
+        #   3. Check if requests are finished (EOS, max_tokens, stop string)
+        #   4. Prepare EngineCoreOutputs to send back to API server
+        #
+        # NEXT STEP: EngineCore sends outputs via ZMQ to async_llm.py
+        # ======================================================================
         print(f"[REQ_FLOW_17] Scheduler.update_from_output() | num_requests={len(scheduler_output.num_scheduled_tokens)}")
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
@@ -1359,6 +1392,23 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        # ======================================================================
+        # PACKET FLOW - STEP 6: SCHEDULER ADDS REQUEST TO QUEUE
+        # ======================================================================
+        # FROM: core.py -> EngineCore._handle_client_request()
+        # TO:   waiting queue -> will be scheduled in schedule()
+        #
+        # The request is now in the SCHEDULER. It goes into the "waiting" queue
+        # until there's enough GPU memory and compute to process it.
+        #
+        # The scheduler manages:
+        #   - waiting: requests waiting to be processed
+        #   - running: requests currently being processed
+        #   - KV cache allocation
+        #   - Batch formation
+        #
+        # NEXT STEP: schedule() picks this request when ready
+        # ======================================================================
         print(f"[REQ_FLOW_07] Scheduler.add_request() | request_id={request.request_id} | num_tokens={request.num_tokens}")
         self.waiting.add_request(request)
         self.requests[request.request_id] = request

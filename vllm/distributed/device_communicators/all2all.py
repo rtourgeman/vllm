@@ -66,6 +66,28 @@ class NaiveAll2AllManager(All2AllManagerBase):
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # ======================================================================
+        # PACKET FLOW - STEP 13a: ALL2ALL DISPATCH (Expert Parallelism)
+        # ======================================================================
+        # FROM: FusedMoE.forward_impl() - after router selects experts
+        # TO:   Expert computation on the GPU that owns each expert
+        #
+        # This is the DISPATCH phase of Expert Parallelism (EP).
+        #
+        # Why All2All is needed:
+        #   - Experts are distributed across GPUs (e.g., GPU0 has experts 0-15,
+        #     GPU1 has experts 16-31, etc.)
+        #   - Each token needs to be computed by its selected experts
+        #   - So tokens must be SENT to the GPUs that own their experts
+        #
+        # What happens here:
+        #   1. hidden_states contain all tokens on this GPU
+        #   2. All2All sends each token to ALL GPUs (they need router_logits
+        #      to know which tokens they should compute)
+        #   3. Each GPU computes only the experts it owns
+        #
+        # NEXT STEP: Local expert computation, then combine() gathers results
+        # ======================================================================
         print(f"[ALL2ALL_FLOW_01] NaiveAll2AllManager.dispatch() | hidden_states.shape={hidden_states.shape} | router_logits.shape={router_logits.shape} | is_sp={is_sequence_parallel}")
         if extra_tensors is not None:
             raise NotImplementedError(
@@ -89,6 +111,25 @@ class NaiveAll2AllManager(All2AllManagerBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
+        # ======================================================================
+        # PACKET FLOW - STEP 13b: ALL2ALL COMBINE (Expert Parallelism)
+        # ======================================================================
+        # FROM: Expert computation (each GPU computed its local experts)
+        # TO:   Back to MoE layer to continue with next transformer layer
+        #
+        # This is the COMBINE phase of Expert Parallelism (EP).
+        #
+        # What happens here:
+        #   1. Each GPU has computed outputs for tokens using its experts
+        #   2. All2All + reduce gathers all expert outputs
+        #   3. Each GPU gets back its original tokens with aggregated outputs
+        #
+        # After combine:
+        #   - Each token has its final MoE output
+        #   - output = sum(expert_output[i] * topk_weight[i]) for selected experts
+        #
+        # NEXT STEP: Return to transformer layer, continue to next layer
+        # ======================================================================
         print(f"[ALL2ALL_FLOW_03] NaiveAll2AllManager.combine() | hidden_states.shape={hidden_states.shape}")
         ep_rank = self.rank if is_sequence_parallel else self.dp_rank
 

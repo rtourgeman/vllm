@@ -371,6 +371,26 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
+        # ======================================================================
+        # PACKET FLOW - STEP 3: ASYNC ENGINE ENTRY
+        # ======================================================================
+        # FROM: serving_completion.py -> engine_client.generate()
+        # TO:   core_client.py -> EngineCoreClient.add_request_async()
+        #
+        # This is the MAIN ENTRY POINT to the vLLM engine from the API layer.
+        #
+        # What happens here:
+        #   1. Process the input (tokenize prompt)
+        #   2. Create EngineCoreRequest with all request data
+        #   3. Send request to EngineCore via ZMQ (add_request)
+        #   4. Start output_handler to receive results
+        #   5. Yield outputs as they arrive from the engine
+        #
+        # The request is sent via ZMQ to a SEPARATE PROCESS (EngineCore)
+        # which runs on the GPU and does the actual inference.
+        #
+        # NEXT STEP: add_request() sends via ZMQ to EngineCore
+        # ======================================================================
         """
         Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
@@ -492,6 +512,27 @@ class AsyncLLM(EngineClient):
         input_processor = self.input_processor
 
         async def output_handler():
+            # ==================================================================
+            # PACKET FLOW - STEP 15: RECEIVE OUTPUT FROM ENGINE
+            # ==================================================================
+            # FROM: EngineCore via ZMQ (after model execution)
+            # TO:   OutputProcessor -> serving_completion.py -> HTTP response
+            #
+            # This background task continuously receives outputs from the
+            # EngineCore (GPU process) via ZMQ.
+            #
+            # For each output:
+            #   1. Receive EngineCoreOutputs from ZMQ
+            #   2. Detokenize sampled token IDs -> text
+            #   3. Put RequestOutput into per-request queues
+            #   4. generate() yields these outputs to the API handler
+            #
+            # The output flows back through:
+            #   output_handler -> generate() yield -> serving_completion
+            #   -> HTTP response to client
+            #
+            # NEXT STEP: Output is yielded to API handler, then to HTTP client
+            # ==================================================================
             try:
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.

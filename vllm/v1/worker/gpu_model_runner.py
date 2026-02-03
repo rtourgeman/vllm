@@ -3060,6 +3060,22 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        # ======================================================================
+        # PACKET FLOW - STEP 9: MODEL RUNNER PREPARES & RUNS MODEL
+        # ======================================================================
+        # FROM: gpu_worker.py -> Worker.execute_model()
+        # TO:   _model_forward() -> model.forward() (the neural network)
+        #
+        # This is the MAIN MODEL EXECUTION function. It:
+        #   1. Updates request state (new tokens, finished requests)
+        #   2. Prepares input tensors (input_ids, positions, attention mask)
+        #   3. Calls _model_forward() to run the actual neural network
+        #   4. Returns logits for sampling
+        #
+        # The batch is processed in a single GPU kernel launch for efficiency.
+        #
+        # NEXT STEP: _model_forward() calls the model's forward pass
+        # ======================================================================
         print(f"[REQ_FLOW_14] GPUModelRunner.execute_model() | total_tokens={scheduler_output.total_num_scheduled_tokens}")
         if self.execute_model_state is not None:
             raise RuntimeError(
@@ -3227,6 +3243,29 @@ class GPUModelRunner(
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
 
+        # ======================================================================
+        # PACKET FLOW - STEP 10: NEURAL NETWORK FORWARD PASS
+        # ======================================================================
+        # FROM: execute_model() above
+        # TO:   model.forward() -> DeepSeekV2ForCausalLM.forward()
+        #
+        # This is where the ACTUAL NEURAL NETWORK runs!
+        #
+        # The model.forward() call goes through:
+        #   1. Embedding layer: input_ids -> hidden states
+        #   2. Transformer layers (loop):
+        #      - Self-attention (with KV cache)
+        #      - MoE layer (Mixture of Experts) - routes tokens to experts
+        #      - Feed-forward network
+        #   3. Final layer norm
+        #   4. LM head: hidden states -> logits (vocabulary scores)
+        #
+        # For MoE models (like DeepSeek):
+        #   - Each token is routed to top-k experts
+        #   - All2All communication if using Expert Parallelism (EP)
+        #
+        # NEXT STEP: model.forward() in deepseek_v2.py
+        # ======================================================================
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (

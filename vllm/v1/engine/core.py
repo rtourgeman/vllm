@@ -1102,6 +1102,20 @@ class EngineCoreProc(EngineCore):
                         continue
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
+                    # ==========================================================
+                    # PACKET FLOW - STEP 5: ENGINE CORE RECEIVES REQUEST
+                    # ==========================================================
+                    # FROM: core_client.py -> ZMQ socket
+                    # TO:   scheduler.py -> Scheduler.add_request()
+                    #
+                    # We are now in the ENGINE CORE PROCESS (runs on GPU).
+                    # The request arrived via ZMQ from the API server process.
+                    #
+                    # This is a separate process to keep GPU work isolated from
+                    # the API server's async event loop.
+                    #
+                    # NEXT STEP: Request goes to scheduler via input_queue
+                    # ==========================================================
                     # Deserialize the request data.
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:

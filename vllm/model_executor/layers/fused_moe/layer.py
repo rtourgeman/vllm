@@ -1695,6 +1695,37 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # ======================================================================
+        # PACKET FLOW - STEP 12: MoE (Mixture of Experts) LAYER
+        # ======================================================================
+        # FROM: DeepseekV2DecoderLayer.forward() (transformer layer)
+        # TO:   forward_impl() -> fused_experts() / All2All communication
+        #
+        # This is the MIXTURE OF EXPERTS layer - the key to DeepSeek's
+        # efficiency and capability!
+        #
+        # How MoE works:
+        #   1. ROUTER: Computes scores for each expert per token
+        #      router_logits = hidden_states @ router_weights
+        #
+        #   2. TOP-K SELECTION: Each token selects top-k experts (usually 6-8)
+        #      topk_weights, topk_ids = topk(softmax(router_logits), k)
+        #
+        #   3. EXPERT COMPUTATION:
+        #      - For each token, only selected experts compute
+        #      - Expert computation: gate_proj * up_proj -> activation -> down_proj
+        #
+        #   4. AGGREGATION: Weighted sum of expert outputs
+        #      output = sum(expert_output[i] * topk_weight[i])
+        #
+        # For Expert Parallelism (EP):
+        #   - Experts are distributed across GPUs
+        #   - All2All DISPATCH: Send tokens to GPU owning their experts
+        #   - Local expert computation
+        #   - All2All COMBINE: Gather results back to original GPU
+        #
+        # NEXT STEP: forward_impl() does the actual MoE computation
+        # ======================================================================
         og_hidden_states = hidden_states.shape[-1]
         if self.hidden_size != og_hidden_states:
             hidden_states = F.pad(

@@ -1,5 +1,63 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ==============================================================================
+#                    vLLM REQUEST FLOW - OVERVIEW
+# ==============================================================================
+# This file is the ENTRY POINT for user requests. Here's the complete flow:
+#
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │  STEP 1: HTTP Request arrives here (api_server.py)                         │
+# │          └─> create_completion() - validates & routes request              │
+# │                                                                            │
+# │  STEP 2: serving_completion.py                                             │
+# │          └─> OpenAIServingCompletion.create_completion() - tokenizes       │
+# │                                                                            │
+# │  STEP 3: async_llm.py                                                      │
+# │          └─> AsyncLLM.generate() - main engine entry point                 │
+# │                                                                            │
+# │  STEP 4: core_client.py                                                    │
+# │          └─> Send request via ZMQ to EngineCore (separate GPU process)     │
+# │                                                                            │
+# │  ═══════════════════════ IPC BOUNDARY (ZMQ) ═══════════════════════════    │
+# │                                                                            │
+# │  STEP 5: core.py (EngineCore - runs on GPU)                                │
+# │          └─> Receives request, adds to scheduler                           │
+# │                                                                            │
+# │  STEP 6-7: scheduler.py                                                    │
+# │          └─> add_request() - queues request                                │
+# │          └─> schedule() - creates batch for GPU execution                  │
+# │                                                                            │
+# │  STEP 8: gpu_worker.py                                                     │
+# │          └─> Worker.execute_model() - orchestrates GPU work                │
+# │                                                                            │
+# │  STEP 9-10: gpu_model_runner.py                                            │
+# │          └─> execute_model() - prepares tensors                            │
+# │          └─> _model_forward() - calls the neural network                   │
+# │                                                                            │
+# │  STEP 11: deepseek_v2.py (or other model file)                             │
+# │          └─> Model.forward() - runs transformer layers                     │
+# │                                                                            │
+# │  STEP 12: fused_moe/layer.py (for MoE models)                              │
+# │          └─> FusedMoE.forward_native() - routes tokens to experts          │
+# │                                                                            │
+# │  STEP 13: all2all.py (for Expert Parallelism)                              │
+# │          └─> dispatch() - sends tokens to expert-owning GPUs               │
+# │          └─> combine() - gathers expert outputs back                       │
+# │                                                                            │
+# │  STEP 14: scheduler.py                                                     │
+# │          └─> update_from_output() - processes generated tokens             │
+# │                                                                            │
+# │  ═══════════════════════ IPC BOUNDARY (ZMQ) ═══════════════════════════    │
+# │                                                                            │
+# │  STEP 15: async_llm.py                                                     │
+# │          └─> output_handler() - receives outputs, detokenizes              │
+# │          └─> generate() yields outputs to API handler                      │
+# │                                                                            │
+# │  FINAL: HTTP Response returned to client                                   │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
+# Search for "PACKET FLOW - STEP" in the codebase to find each step.
+# ==============================================================================
 import asyncio
 import hashlib
 import importlib
@@ -530,6 +588,22 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
+    # ==========================================================================
+    # PACKET FLOW - STEP 1: HTTP REQUEST ENTRY POINT
+    # ==========================================================================
+    # This is where the user's request ENTERS the vLLM system.
+    #
+    # FROM: External client (curl, Python requests, etc.)
+    # TO:   serving_completion.py -> OpenAIServingCompletion.create_completion()
+    #
+    # The request contains:
+    #   - model: which model to use
+    #   - prompt: the user's input text
+    #   - max_tokens: how many tokens to generate
+    #   - Other sampling parameters (temperature, top_p, etc.)
+    #
+    # NEXT STEP: handler.create_completion() calls the serving layer
+    # ==========================================================================
     import time as _time
     _req_trace_ts = _time.time_ns()
     print(f"[REQ_FLOW_01] HTTP /v1/completions received | trace_ts={_req_trace_ts} | model={request.model} | stream={request.stream}")

@@ -9,6 +9,92 @@ This document explains how **Mixture of Experts (MoE)** layers and the **Expert 
 
 ---
 
+## How to Find the Flow in the Code
+
+**The complete packet flow is documented directly in the source code with comment blocks.**
+
+To find each step, search for `PACKET FLOW - STEP` in the codebase:
+
+```bash
+grep -rn "PACKET FLOW - STEP" vllm/
+```
+
+### Quick Reference: Files with Flow Comments
+
+| Step | File | Function | Description |
+|------|------|----------|-------------|
+| **STEP 1** | `vllm/entrypoints/openai/api_server.py` | `create_completion()` | HTTP request entry |
+| **STEP 2** | `vllm/entrypoints/openai/serving_completion.py` | `create_completion()` | Request validation |
+| **STEP 3** | `vllm/v1/engine/async_llm.py` | `generate()` | Engine entry point |
+| **STEP 4** | `vllm/v1/engine/core_client.py` | `add_request_async()` | ZMQ send to GPU |
+| **STEP 5** | `vllm/v1/engine/core.py` | `_handle_client_request()` | EngineCore receives |
+| **STEP 6** | `vllm/v1/core/sched/scheduler.py` | `add_request()` | Add to queue |
+| **STEP 7** | `vllm/v1/core/sched/scheduler.py` | `schedule()` | Create batch |
+| **STEP 8** | `vllm/v1/worker/gpu_worker.py` | `execute_model()` | GPU worker |
+| **STEP 9-10** | `vllm/v1/worker/gpu_model_runner.py` | `execute_model()` | Model runner |
+| **STEP 11** | `vllm/model_executor/models/deepseek_v2.py` | `forward()` | Model forward |
+| **STEP 12** | `vllm/model_executor/layers/fused_moe/layer.py` | `forward_native()` | MoE layer |
+| **STEP 13a-b** | `vllm/distributed/device_communicators/all2all.py` | `dispatch()/combine()` | EP communication |
+| **STEP 14** | `vllm/v1/core/sched/scheduler.py` | `update_from_output()` | Process output |
+| **STEP 15** | `vllm/v1/engine/async_llm.py` | `output_handler()` | Return to client |
+
+### Visual Overview (also in api_server.py header)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  STEP 1: HTTP Request arrives (api_server.py)                               │
+│          └─> create_completion() - validates & routes request              │
+│                                                                            │
+│  STEP 2: serving_completion.py                                              │
+│          └─> OpenAIServingCompletion.create_completion() - tokenizes       │
+│                                                                            │
+│  STEP 3: async_llm.py                                                       │
+│          └─> AsyncLLM.generate() - main engine entry point                 │
+│                                                                            │
+│  STEP 4: core_client.py                                                     │
+│          └─> Send request via ZMQ to EngineCore (separate GPU process)     │
+│                                                                            │
+│  ═══════════════════════ IPC BOUNDARY (ZMQ) ═══════════════════════════    │
+│                                                                            │
+│  STEP 5: core.py (EngineCore - runs on GPU)                                 │
+│          └─> Receives request, adds to scheduler                           │
+│                                                                            │
+│  STEP 6-7: scheduler.py                                                     │
+│          └─> add_request() - queues request                                │
+│          └─> schedule() - creates batch for GPU execution                  │
+│                                                                            │
+│  STEP 8: gpu_worker.py                                                      │
+│          └─> Worker.execute_model() - orchestrates GPU work                │
+│                                                                            │
+│  STEP 9-10: gpu_model_runner.py                                             │
+│          └─> execute_model() - prepares tensors                            │
+│          └─> _model_forward() - calls the neural network                   │
+│                                                                            │
+│  STEP 11: deepseek_v2.py (or other model file)                              │
+│          └─> Model.forward() - runs transformer layers                     │
+│                                                                            │
+│  STEP 12: fused_moe/layer.py (for MoE models)                               │
+│          └─> FusedMoE.forward_native() - routes tokens to experts          │
+│                                                                            │
+│  STEP 13: all2all.py (for Expert Parallelism)                               │
+│          └─> dispatch() - sends tokens to expert-owning GPUs               │
+│          └─> combine() - gathers expert outputs back                       │
+│                                                                            │
+│  STEP 14: scheduler.py                                                      │
+│          └─> update_from_output() - processes generated tokens             │
+│                                                                            │
+│  ═══════════════════════ IPC BOUNDARY (ZMQ) ═══════════════════════════    │
+│                                                                            │
+│  STEP 15: async_llm.py                                                      │
+│          └─> output_handler() - receives outputs, detokenizes              │
+│          └─> generate() yields outputs to API handler                      │
+│                                                                            │
+│  FINAL: HTTP Response returned to client                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Table of Contents
 
 1. [Key Concepts](#key-concepts) - Hidden states, requests vs tokens

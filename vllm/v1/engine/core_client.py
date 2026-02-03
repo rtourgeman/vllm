@@ -1029,6 +1029,23 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async("get_supported_tasks")
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        # ======================================================================
+        # PACKET FLOW - STEP 4: ZMQ SEND TO ENGINE CORE
+        # ======================================================================
+        # FROM: async_llm.py -> add_request()
+        # TO:   core.py -> EngineCore (running in SEPARATE PROCESS)
+        #
+        # This is the IPC (Inter-Process Communication) boundary!
+        #
+        # The request is serialized and sent via ZMQ socket to the EngineCore
+        # process which runs on the GPU. This allows the API server to remain
+        # responsive while the GPU does heavy computation.
+        #
+        # For Data Parallel (DP) setups, DPLBAsyncMPClient routes to one of
+        # multiple EngineCore processes for load balancing.
+        #
+        # NEXT STEP: EngineCore receives via ZMQ in _handle_client_request()
+        # ======================================================================
         print(f"[REQ_FLOW_04a] AsyncMPClient sending request via ZMQ | request_id={request.request_id}")
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)

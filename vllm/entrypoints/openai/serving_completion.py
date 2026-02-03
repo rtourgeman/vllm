@@ -86,6 +86,22 @@ class OpenAIServingCompletion(OpenAIServing):
         request: CompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
+        # ======================================================================
+        # PACKET FLOW - STEP 2: REQUEST VALIDATION & PREPARATION
+        # ======================================================================
+        # FROM: api_server.py -> create_completion()
+        # TO:   async_llm.py -> AsyncLLM.generate()
+        #
+        # This function:
+        #   1. Validates the request (model exists, parameters valid)
+        #   2. Tokenizes the prompt text into token IDs
+        #   3. Creates SamplingParams from the request
+        #   4. Calls engine_client.generate() to start inference
+        #
+        # The engine_client is AsyncLLM - the async wrapper around the engine.
+        #
+        # NEXT STEP: self.engine_client.generate() sends to the engine
+        # ======================================================================
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/completions/create

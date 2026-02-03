@@ -1470,6 +1470,29 @@ class DeepseekV2ForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # ======================================================================
+        # PACKET FLOW - STEP 11: MODEL FORWARD (DeepSeek-V2/V3)
+        # ======================================================================
+        # FROM: gpu_model_runner.py -> _model_forward()
+        # TO:   DeepseekV2Model.forward() -> transformer layers
+        #
+        # This is the TOP-LEVEL MODEL forward pass for DeepSeek models.
+        #
+        # The model architecture:
+        #   1. Embedding: input_ids -> hidden_states
+        #   2. N Transformer layers (each contains):
+        #      - Self-Attention (with KV cache for efficiency)
+        #      - MoE Layer: Routes tokens to top-k experts
+        #        * Router computes expert scores
+        #        * Top-k experts selected per token
+        #        * For EP: All2All sends tokens to expert-owning GPUs
+        #        * Experts compute: gate * up * down projections
+        #        * For EP: All2All gathers results back
+        #   3. Final LayerNorm
+        #   4. LM Head: hidden_states -> logits (vocabulary probabilities)
+        #
+        # NEXT STEP: self.model() calls DeepseekV2Model.forward()
+        # ======================================================================
         print(f"[MODEL_FLOW_01] DeepseekV2ForCausalLM.forward() | input_ids.shape={input_ids.shape if input_ids is not None else None} | positions.shape={positions.shape}")
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds

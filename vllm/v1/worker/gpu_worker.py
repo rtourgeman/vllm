@@ -593,6 +593,22 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | None:
+        # ======================================================================
+        # PACKET FLOW - STEP 8: GPU WORKER EXECUTES BATCH
+        # ======================================================================
+        # FROM: core.py -> EngineCore.step() -> executor.execute_model()
+        # TO:   gpu_model_runner.py -> GPUModelRunner.execute_model()
+        #
+        # We are now on a GPU WORKER. Each worker handles one GPU.
+        # For tensor parallelism (TP), multiple workers coordinate.
+        #
+        # This function:
+        #   1. Receives the scheduler output (batch of requests)
+        #   2. Coordinates with other workers for pipeline parallelism
+        #   3. Calls model_runner.execute_model() to run the actual model
+        #
+        # NEXT STEP: model_runner.execute_model() runs the neural network
+        # ======================================================================
         print(f"[REQ_FLOW_13] Worker.execute_model() | rank={self.rank} | local_rank={self.local_rank} | total_tokens={scheduler_output.total_num_scheduled_tokens}")
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
