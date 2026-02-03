@@ -66,6 +66,7 @@ class NaiveAll2AllManager(All2AllManagerBase):
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        print(f"[ALL2ALL_FLOW_01] NaiveAll2AllManager.dispatch() | hidden_states.shape={hidden_states.shape} | router_logits.shape={router_logits.shape} | is_sp={is_sequence_parallel}")
         if extra_tensors is not None:
             raise NotImplementedError(
                 "extra_tensors is not supported for NaiveAll2AllManager"
@@ -82,11 +83,13 @@ class NaiveAll2AllManager(All2AllManagerBase):
             router_logits, cu_tokens_across_sp_cpu, is_sequence_parallel
         )
 
+        print(f"[ALL2ALL_FLOW_02] NaiveAll2AllManager.dispatch() complete | output_hidden.shape={hidden_states.shape}")
         return hidden_states, router_logits
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
+        print(f"[ALL2ALL_FLOW_03] NaiveAll2AllManager.combine() | hidden_states.shape={hidden_states.shape}")
         ep_rank = self.rank if is_sequence_parallel else self.dp_rank
 
         dp_metadata = get_forward_context().dp_metadata
@@ -99,6 +102,7 @@ class NaiveAll2AllManager(All2AllManagerBase):
 
         all_hidden_states = get_ep_group().all_reduce(hidden_states)
         hidden_states = all_hidden_states[start:end, :]
+        print(f"[ALL2ALL_FLOW_04] NaiveAll2AllManager.combine() complete | output.shape={hidden_states.shape}")
         return hidden_states
 
     def destroy(self):
@@ -127,6 +131,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         Gather hidden_states and router_logits from all dp ranks.
         """
+        print(f"[ALL2ALL_FLOW_01] AgRsAll2AllManager.dispatch() | hidden_states.shape={hidden_states.shape} | router_logits.shape={router_logits.shape}")
         dp_metadata = get_forward_context().dp_metadata
         assert dp_metadata is not None
         sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
@@ -144,6 +149,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
             sizes=sizes,
         )
 
+        print(f"[ALL2ALL_FLOW_02] AgRsAll2AllManager.dispatch() complete | output_hidden.shape={gathered_tensors[0].shape}")
         if extra_tensors is not None:
             return (gathered_tensors[0], gathered_tensors[1], gathered_tensors[2:])
         return gathered_tensors[0], gathered_tensors[1]
@@ -154,6 +160,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         Reduce-scatter hidden_states across all dp ranks.
         """
+        print(f"[ALL2ALL_FLOW_03] AgRsAll2AllManager.combine() | hidden_states.shape={hidden_states.shape}")
         dp_metadata = get_forward_context().dp_metadata
         assert dp_metadata is not None
         sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
@@ -161,6 +168,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
+        print(f"[ALL2ALL_FLOW_04] AgRsAll2AllManager.combine() complete | output.shape={hidden_states.shape}")
         return hidden_states
 
     def destroy(self):

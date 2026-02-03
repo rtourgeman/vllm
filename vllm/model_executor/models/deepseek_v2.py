@@ -1470,9 +1470,11 @@ class DeepseekV2ForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        print(f"[MODEL_FLOW_01] DeepseekV2ForCausalLM.forward() | input_ids.shape={input_ids.shape if input_ids is not None else None} | positions.shape={positions.shape}")
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
+        print(f"[MODEL_FLOW_04] DeepseekV2ForCausalLM.forward() complete | hidden_states.shape={hidden_states.shape if not isinstance(hidden_states, IntermediateTensors) else 'IntermediateTensors'}")
         return hidden_states
 
     def compute_logits(

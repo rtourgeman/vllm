@@ -3328,6 +3328,7 @@ class GPUModelRunner(
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        print(f"[REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting")
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 
