@@ -137,40 +137,42 @@ MoE (Mixture of Experts) layers use **sparse activation** - each token is proces
 
 ### Complete Call Path: HTTP Request → MoE Layer
 
+The following flow has been **verified with actual trace logs**. Each `[REQ_FLOW_*]` marker corresponds to a print statement in the code.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
 │  1. HTTP REQUEST (API Server Process)                                               │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  Client sends: POST /v1/completions {"prompt": "Hello", "max_tokens": 100}          │
+│  Client sends: POST /v1/completions {"prompt": "Hello", "max_tokens": 10}           │
 │                                                                                     │
-│  FastAPI (Uvicorn)                                                                  │
+│  [REQ_FLOW_01] HTTP /v1/completions received                                        │
 │      │                                                                              │
 │      └── api_server.py: create_completion()                                         │
 │              │                                                                      │
-│              └── OpenAIServingCompletion.create_completion()                        │
-│                      │                                                              │
-│                      └── AsyncLLM.generate()                                        │
-│                              │                                                      │
-│                              └── DPLBAsyncMPClient.add_request_async()              │
-│                                      │                                              │
-│                                      └── ZMQ SEND (routes to dp_rank)               │
+│  [REQ_FLOW_02] OpenAIServingCompletion.create_completion()                          │
+│              │                                                                      │
+│  [REQ_FLOW_03a] InputProcessor.process_inputs()                                     │
+│              │                                                                      │
+│  [REQ_FLOW_03] AsyncLLM.generate()                                                  │
+│              │                                                                      │
+│  [REQ_FLOW_04b] DPLBAsyncMPClient sending request via ZMQ                           │
+│              │                                                                      │
+│  [REQ_FLOW_04] Request added to EngineCore                                          │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
-                                              │ ZMQ socket
+                                              │ ZMQ socket (routes to dp_rank)
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
 │  2. ENGINE CORE (DPEngineCoreActor - Ray Actor, one per GPU)                        │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  ZMQ RECV                                                                           │
+│  [REQ_FLOW_05] EngineCore received ADD request via ZMQ                              │
 │      │                                                                              │
-│      └── EngineCore.process_input_socket()                                          │
-│              │                                                                      │
-│              └── EngineCore._handle_client_request()                                │
-│                      │                                                              │
-│                      └── Scheduler.add_request()    # Add to waiting queue          │
+│  [REQ_FLOW_06] EngineCore dispatching ADD to scheduler                              │
+│      │                                                                              │
+│  [REQ_FLOW_07] Scheduler.add_request() | num_tokens=6                               │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
@@ -180,13 +182,13 @@ MoE (Mixture of Experts) layers use **sparse activation** - each token is proces
 │  3. ENGINE CORE STEP (runs continuously)                                            │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  EngineCore.step()                                                                  │
+│  [REQ_FLOW_10] EngineCore.step() - calling scheduler.schedule()                     │
 │      │                                                                              │
-│      ├── Scheduler.schedule()               # Build batch from waiting/running      │
-│      │       │                                                                      │
-│      │       └── Returns: SchedulerOutput with total_num_scheduled_tokens           │
+│  [REQ_FLOW_08] Scheduler.schedule() | waiting=1 | running=0                         │
 │      │                                                                              │
-│      └── model_executor.execute_model(scheduler_output)                             │
+│  [REQ_FLOW_09] Scheduler batch ready | num_new_reqs=1 | total_tokens=6              │
+│      │                                                                              │
+│  [REQ_FLOW_11] EngineCore.step() - executing model | total_tokens=6                 │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
@@ -196,35 +198,128 @@ MoE (Mixture of Experts) layers use **sparse activation** - each token is proces
 │  4. MODEL EXECUTION (Worker + GPUModelRunner)                                       │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  Worker.execute_model()                                                             │
+│  [REQ_FLOW_13] Worker.execute_model() | rank=0 | total_tokens=6                     │
 │      │                                                                              │
-│      └── GPUModelRunner.execute_model()                                             │
-│              │                                                                      │
-│              ├── _prepare_inputs()          # Build input tensors                   │
-│              │                                                                      │
-│              └── _model_forward()           # Transformer forward pass              │
-│                      │                                                              │
-│                      └── model.forward(hidden_states)                               │
+│  [REQ_FLOW_14] GPUModelRunner.execute_model() | total_tokens=6                      │
+│      │                                                                              │
+│      ├── _prepare_inputs()                    # Build input tensors                 │
+│      │                                                                              │
+│  [REQ_FLOW_15] GPUModelRunner._model_forward() starting | num_tokens=8              │
+│      │                                       (padded from 6 to 8 for alignment)     │
+│      │                                                                              │
+│  [MODEL_FLOW_01] DeepseekV2ForCausalLM.forward() | input_ids.shape=[8]              │
+│      │                                                                              │
+│      └── (29 transformer layers with MoE)                                           │
+│                                                                                     │
+│  [MODEL_FLOW_04] DeepseekV2ForCausalLM.forward() complete | hidden_states=[8, 2560] │
+│      │                                                                              │
+│  [REQ_FLOW_16] GPUModelRunner._model_forward() complete                             │
+│      │                                                                              │
+│  [REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting                             │
+│      │                                                                              │
+│  [REQ_FLOW_17] Scheduler.update_from_output() | num_requests=1                      │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
-                                              │ For each transformer layer
+                                              │ DECODE LOOP (repeats for each token)
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  5. TRANSFORMER LAYER (repeated 30 times for DeepSeek-V3-Lite)                      │
+│  5. DECODE ITERATIONS (10 times for max_tokens=10)                                  │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  DecoderLayer.forward()                                                             │
-│      │                                                                              │
-│      ├── self_attn()                        # Attention                             │
-│      │                                                                              │
-│      └── mlp()                              # MLP or MoE                            │
-│              │                                                                      │
-│              └── FusedMoE.forward()         # <══ MoE LAYER (layers 1-29)           │
-│                      │                                                              │
-│                      └── forward_impl()     # Router → Select → EPLB → Dispatch     │
+│  [REQ_FLOW_10] EngineCore.step() - calling scheduler.schedule()                     │
+│  [REQ_FLOW_08] Scheduler.schedule() | waiting=0 | running=1                         │
+│  [REQ_FLOW_09] Scheduler batch ready | num_cached_reqs=1 | total_tokens=1           │
+│  [REQ_FLOW_11] EngineCore.step() - executing model | total_tokens=1                 │
+│  [REQ_FLOW_13] Worker.execute_model() | total_tokens=1                              │
+│  [REQ_FLOW_14] GPUModelRunner.execute_model() | total_tokens=1                      │
+│  [REQ_FLOW_15] GPUModelRunner._model_forward() starting | num_tokens=1              │
+│  [REQ_FLOW_16] GPUModelRunner._model_forward() complete                             │
+│  [REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting                             │
+│  [REQ_FLOW_17] Scheduler.update_from_output() | num_requests=1                      │
+│                                                                                     │
+│          ... (repeats 10 times until max_tokens reached) ...                        │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              │ Output streaming (parallel)
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  6. OUTPUT PROCESSING (back to API Server)                                          │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [REQ_FLOW_18] AsyncLLM output_handler received | num_outputs=1                     │
+│      │                                                                              │
+│  [REQ_FLOW_18a] OutputProcessor.process_outputs() | finished=0   (multiple times)   │
+│      │                                                                              │
+│  [REQ_FLOW_18a] OutputProcessor.process_outputs() | finished=1   (final)            │
+│      │                                                                              │
+│  [REQ_FLOW_19] Request complete | request_id=cmpl-xxx                               │
+│      │                                                                              │
+│  HTTP 200 OK → Client receives response                                             │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              │ Background (periodic)
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  7. EPLB LOAD BALANCING (background, every 100 steps for logging)                   │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [EPLB_FLOW_01] EplbState.step() | rearrangement_step=X/3000 | window_step=Y/1000   │
+│      │                                                                              │
+│      └── (Every 3000 steps triggers rearrangement: EPLB_FLOW_02, 03, 04)            │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Verified Flow Trace Summary
+
+Based on actual server logs from a real request:
+
+```
+API SERVER:
+  [REQ_FLOW_01] HTTP /v1/completions received
+  [REQ_FLOW_02] OpenAIServingCompletion.create_completion()
+  [REQ_FLOW_03a] InputProcessor.process_inputs()
+  [REQ_FLOW_03] AsyncLLM.generate()
+  [REQ_FLOW_04b] DPLBAsyncMPClient sending request via ZMQ
+  [REQ_FLOW_04] Request added to EngineCore
+
+ENGINE CORE (DPEngineCoreActor):
+  [REQ_FLOW_05] EngineCore received ADD request via ZMQ
+  [REQ_FLOW_06] EngineCore dispatching ADD to scheduler
+  [REQ_FLOW_07] Scheduler.add_request()
+
+PREFILL (first forward pass):
+  [REQ_FLOW_10] EngineCore.step() - calling scheduler.schedule()
+  [REQ_FLOW_08] Scheduler.schedule() | waiting=1, running=0
+  [REQ_FLOW_09] Scheduler batch ready | num_new_reqs=1
+  [REQ_FLOW_11] EngineCore.step() - executing model
+  [REQ_FLOW_13] Worker.execute_model()
+  [REQ_FLOW_14] GPUModelRunner.execute_model()
+  [REQ_FLOW_15] GPUModelRunner._model_forward() starting
+  [MODEL_FLOW_01] DeepseekV2ForCausalLM.forward()
+  [MODEL_FLOW_04] DeepseekV2ForCausalLM.forward() complete
+  [REQ_FLOW_16] GPUModelRunner._model_forward() complete
+  [REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting
+  [REQ_FLOW_17] Scheduler.update_from_output()
+
+DECODE (repeats for each generated token):
+  [REQ_FLOW_10] → [REQ_FLOW_08] → [REQ_FLOW_09] → [REQ_FLOW_11]
+  [REQ_FLOW_13] → [REQ_FLOW_14] → [REQ_FLOW_15] → [REQ_FLOW_16]
+  [REQ_FLOW_16a] → [REQ_FLOW_17]
+  (... repeats N times for max_tokens ...)
+
+OUTPUT STREAMING:
+  [REQ_FLOW_18] AsyncLLM output_handler received
+  [REQ_FLOW_18a] OutputProcessor.process_outputs() | finished=0
+  (... multiple times ...)
+  [REQ_FLOW_18a] OutputProcessor.process_outputs() | finished=1
+  [REQ_FLOW_19] Request complete
+
+BACKGROUND:
+  [EPLB_FLOW_01] EplbState.step() (periodic logging)
 ```
 
 **Summary of the path:**
@@ -1305,6 +1400,98 @@ A **Ray actor** that hosts a complete vLLM engine core for one DP rank:
 ---
 
 ## Reference
+
+### Trace Markers (Print Statements)
+
+The following trace markers are embedded in the codebase for debugging the request flow:
+
+#### Request Flow Markers (`REQ_FLOW_*`)
+
+| Marker | File | Function | Description |
+|--------|------|----------|-------------|
+| `REQ_FLOW_01` | `api_server.py` | `create_completion()` / `create_chat_completion()` | HTTP request received |
+| `REQ_FLOW_02` | `serving_completion.py` / `serving_chat.py` | `create_completion()` / `create_chat_completion()` | Serving handler called |
+| `REQ_FLOW_03` | `async_llm.py` | `generate()` | AsyncLLM.generate() entry |
+| `REQ_FLOW_03a` | `input_processor.py` | `process_inputs()` | Input processing |
+| `REQ_FLOW_04` | `async_llm.py` | `add_request()` | Request added to EngineCore |
+| `REQ_FLOW_04a` | `core_client.py` | `AsyncMPClient.add_request_async()` | ZMQ send (single DP) |
+| `REQ_FLOW_04b` | `core_client.py` | `DPLBAsyncMPClient.add_request_async()` | ZMQ send (DP load balanced) |
+| `REQ_FLOW_05` | `core.py` | `_handle_client_request()` | EngineCore receives request via ZMQ |
+| `REQ_FLOW_06` | `core.py` | `add_request()` | Dispatching to scheduler |
+| `REQ_FLOW_07` | `scheduler.py` | `add_request()` | Scheduler adds request |
+| `REQ_FLOW_08` | `scheduler.py` | `schedule()` | Scheduler.schedule() entry |
+| `REQ_FLOW_09` | `scheduler.py` | `schedule()` | Batch ready |
+| `REQ_FLOW_10` | `core.py` | `step()` | EngineCore.step() calling schedule |
+| `REQ_FLOW_11` | `core.py` | `step()` | EngineCore.step() executing model |
+| `REQ_FLOW_12` | `multiproc_executor.py` / `ray_executor.py` | `execute_model()` | Executor dispatching to workers |
+| `REQ_FLOW_13` | `gpu_worker.py` | `execute_model()` | Worker.execute_model() |
+| `REQ_FLOW_14` | `gpu_model_runner.py` | `execute_model()` | GPUModelRunner.execute_model() |
+| `REQ_FLOW_15` | `gpu_model_runner.py` | `execute_model()` | _model_forward() starting |
+| `REQ_FLOW_16` | `gpu_model_runner.py` | `execute_model()` | _model_forward() complete |
+| `REQ_FLOW_16a` | `gpu_model_runner.py` | `sample_tokens()` | Sampling starting |
+| `REQ_FLOW_17` | `scheduler.py` | `update_from_output()` | Scheduler updates from model output |
+| `REQ_FLOW_18` | `async_llm.py` | `output_handler()` | Output handler received outputs |
+| `REQ_FLOW_18a` | `output_processor.py` | `process_outputs()` | Output processing |
+| `REQ_FLOW_19` | `async_llm.py` | `generate()` | Request complete |
+
+#### Model Flow Markers (`MODEL_FLOW_*`)
+
+| Marker | File | Function | Description |
+|--------|------|----------|-------------|
+| `MODEL_FLOW_01` | `deepseek_v2.py` | `DeepseekV2ForCausalLM.forward()` | Model forward entry |
+| `MODEL_FLOW_04` | `deepseek_v2.py` | `DeepseekV2ForCausalLM.forward()` | Model forward complete |
+
+**Note:** Prints inside `@support_torch_compile` decorated methods are not allowed (breaks torch.dynamo).
+
+#### MoE Flow Markers (`MOE_FLOW_*`)
+
+| Marker | File | Function | Description |
+|--------|------|----------|-------------|
+| `MOE_FLOW_01` | `layer.py` | `select_experts()` | Expert selection (first call per layer) |
+| `MOE_FLOW_02` | `layer.py` | `forward_impl()` | FusedMoE forward entry (first call per layer) |
+| `MOE_FLOW_03` | `layer.py` | `select_experts()` | EPLB mapping called (first call per layer) |
+| `MOE_FLOW_03a/b/c` | `layer.py` | `select_experts()` | EPLB mapping details |
+| `MOE_FLOW_04` | `layer.py` | `forward_impl()` | MoE layer complete (first call per layer) |
+
+#### EPLB Flow Markers (`EPLB_FLOW_*`)
+
+| Marker | File | Function | Description |
+|--------|------|----------|-------------|
+| `EPLB_FLOW_01` | `eplb_state.py` | `step()` | EplbState.step() (every 100 steps) |
+| `EPLB_FLOW_01a/b/c` | `eplb_state.py` | `step()` | Load window save details (first call) |
+| `EPLB_FLOW_02` | `eplb_state.py` | `rearrange()` | Rearrangement starting |
+| `EPLB_FLOW_03` | `policy/default.py` | `rebalance_experts()` | Policy computing new mapping |
+| `EPLB_FLOW_04` | `rebalance_execute.py` | `rearrange_expert_weights_inplace()` | Weight transfer |
+
+#### All-to-All Flow Markers (`ALL2ALL_FLOW_*`)
+
+| Marker | File | Function | Description |
+|--------|------|----------|-------------|
+| `ALL2ALL_FLOW_01` | `all2all.py` | `dispatch()` | All-to-all dispatch starting |
+| `ALL2ALL_FLOW_02` | `all2all.py` | `dispatch()` | All-to-all dispatch complete |
+| `ALL2ALL_FLOW_03` | `all2all.py` | `combine()` | All-to-all combine starting |
+| `ALL2ALL_FLOW_04` | `all2all.py` | `combine()` | All-to-all combine complete |
+
+### Filtering Logs
+
+```bash
+# Full request flow
+grep -E "REQ_FLOW" server.log
+
+# Model + MoE internals
+grep -E "(MODEL_FLOW|MOE_FLOW)" server.log
+
+# EPLB load balancing
+grep -E "EPLB_FLOW" server.log
+
+# All-to-all communication (EP)
+grep -E "ALL2ALL_FLOW" server.log
+
+# Everything
+grep -E "(REQ_FLOW|MODEL_FLOW|MOE_FLOW|EPLB_FLOW|ALL2ALL_FLOW)" server.log
+```
+
+---
 
 ### Files and Classes
 
