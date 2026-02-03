@@ -43,52 +43,52 @@ grep -rn "PACKET FLOW - STEP" vllm/
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  STEP 1: HTTP Request arrives (api_server.py)                               │
-│          └─> create_completion() - validates & routes request              │
-│                                                                            │
+│          └─> create_completion() - validates & routes request               │
+│                                                                             │
 │  STEP 2: serving_completion.py                                              │
-│          └─> OpenAIServingCompletion.create_completion() - tokenizes       │
-│                                                                            │
+│          └─> OpenAIServingCompletion.create_completion() - tokenizes        │
+│                                                                             │
 │  STEP 3: async_llm.py                                                       │
-│          └─> AsyncLLM.generate() - main engine entry point                 │
-│                                                                            │
+│          └─> AsyncLLM.generate() - main engine entry point                  │
+│                                                                             │
 │  STEP 4: core_client.py                                                     │
-│          └─> Send request via ZMQ to EngineCore (separate GPU process)     │
-│                                                                            │
-│  ═══════════════════════ IPC BOUNDARY (ZMQ) ═══════════════════════════    │
-│                                                                            │
+│          └─> Send request via ZMQ to EngineCore (separate GPU process)      │
+│                                                                             │
+│  ═══════════════════════ IPC BOUNDARY (ZMQ) ═══════════════════════════     │
+│                                                                             │
 │  STEP 5: core.py (EngineCore - runs on GPU)                                 │
-│          └─> Receives request, adds to scheduler                           │
-│                                                                            │
+│          └─> Receives request, adds to scheduler                            │
+│                                                                             │
 │  STEP 6-7: scheduler.py                                                     │
-│          └─> add_request() - queues request                                │
-│          └─> schedule() - creates batch for GPU execution                  │
-│                                                                            │
+│          └─> add_request() - queues request                                 │
+│          └─> schedule() - creates batch for GPU execution                   │
+│                                                                             │
 │  STEP 8: gpu_worker.py                                                      │
-│          └─> Worker.execute_model() - orchestrates GPU work                │
-│                                                                            │
+│          └─> Worker.execute_model() - orchestrates GPU work                 │
+│                                                                             │
 │  STEP 9-10: gpu_model_runner.py                                             │
-│          └─> execute_model() - prepares tensors                            │
-│          └─> _model_forward() - calls the neural network                   │
-│                                                                            │
+│          └─> execute_model() - prepares tensors                             │
+│          └─> _model_forward() - calls the neural network                    │
+│                                                                             │
 │  STEP 11: deepseek_v2.py (or other model file)                              │
-│          └─> Model.forward() - runs transformer layers                     │
-│                                                                            │
+│          └─> Model.forward() - runs transformer layers                      │
+│                                                                             │
 │  STEP 12: fused_moe/layer.py (for MoE models)                               │
-│          └─> FusedMoE.forward_native() - routes tokens to experts          │
-│                                                                            │
+│          └─> FusedMoE.forward_native() - routes tokens to experts           │
+│                                                                             │
 │  STEP 13: all2all.py (for Expert Parallelism)                               │
-│          └─> dispatch() - sends tokens to expert-owning GPUs               │
-│          └─> combine() - gathers expert outputs back                       │
-│                                                                            │
+│          └─> dispatch() - sends tokens to expert-owning GPUs                │
+│          └─> combine() - gathers expert outputs back                        │
+│                                                                             │
 │  STEP 14: scheduler.py                                                      │
-│          └─> update_from_output() - processes generated tokens             │
-│                                                                            │
-│  ═══════════════════════ IPC BOUNDARY (ZMQ) ═══════════════════════════    │
-│                                                                            │
+│          └─> update_from_output() - processes generated tokens              │
+│                                                                             │
+│  ═══════════════════════ IPC BOUNDARY (ZMQ) ═══════════════════════════     │
+│                                                                             │
 │  STEP 15: async_llm.py                                                      │
-│          └─> output_handler() - receives outputs, detokenizes              │
-│          └─> generate() yields outputs to API handler                      │
-│                                                                            │
+│          └─> output_handler() - receives outputs, detokenizes               │
+│          └─> generate() yields outputs to API handler                       │
+│                                                                             │
 │  FINAL: HTTP Response returned to client                                    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -221,140 +221,597 @@ MoE (Mixture of Experts) layers use **sparse activation** - each token is proces
 | `ep_size` | 4 | 4 GPUs for Expert Parallelism |
 | `experts_per_gpu` | 22 | 88 / 4 = 22 physical experts per GPU |
 
-### Complete Call Path: HTTP Request → MoE Layer
+### Complete Call Path: HTTP Request → MoE Layer → Response
 
 The following flow has been **verified with actual trace logs**. Each `[REQ_FLOW_*]` marker corresponds to a print statement in the code.
 
 ```
+╔═════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                     ║
+║   COMPLETE vLLM REQUEST FLOW - FROM HTTP REQUEST TO RESPONSE                        ║
+║                                                                                     ║
+║   This diagram shows every step a "packet" takes from when the user sends           ║
+║   a request until they receive the response.                                        ║
+║                                                                                     ║
+╚═════════════════════════════════════════════════════════════════════════════════════╝
+
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  1. HTTP REQUEST (API Server Process)                                               │
+│  STEP 1: HTTP REQUEST ENTRY                                                         │
+│  File: vllm/entrypoints/openai/api_server.py                                        │
+│  Function: create_completion()                                                      │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  Client sends: POST /v1/completions {"prompt": "Hello", "max_tokens": 10}           │
+│  User sends:                                                                        │
+│    curl -X POST http://localhost:8006/v1/completions \                              │
+│         -d '{"prompt": "Hello, how are you?", "max_tokens": 50}'                    │
 │                                                                                     │
-│  [REQ_FLOW_01] HTTP /v1/completions received                                        │
+│  [REQ_FLOW_01] HTTP /v1/completions received | model=... | stream=False             │
 │      │                                                                              │
-│      └── api_server.py: create_completion()                                         │
-│              │                                                                      │
-│  [REQ_FLOW_02] OpenAIServingCompletion.create_completion()                          │
-│              │                                                                      │
-│  [REQ_FLOW_03a] InputProcessor.process_inputs()                                     │
-│              │                                                                      │
-│  [REQ_FLOW_03] AsyncLLM.generate()                                                  │
-│              │                                                                      │
-│  [REQ_FLOW_04b] DPLBAsyncMPClient sending request via ZMQ                           │
-│              │                                                                      │
-│  [REQ_FLOW_04] Request added to EngineCore                                          │
+│      │   FastAPI receives HTTP POST request                                         │
+│      │   Request is validated and routed to handler                                 │
+│      │                                                                              │
+│      └──────────────────────────────────────────────────────────────────────────────│
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
-                                              │ ZMQ socket (routes to dp_rank)
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  2. ENGINE CORE (DPEngineCoreActor - Ray Actor, one per GPU)                        │
+│  STEP 2: REQUEST VALIDATION & TOKENIZATION                                          │
+│  File: vllm/entrypoints/openai/serving_completion.py                                │
+│  Function: OpenAIServingCompletion.create_completion()                              │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  [REQ_FLOW_05] EngineCore received ADD request via ZMQ                              │
+│  [REQ_FLOW_02] OpenAIServingCompletion.create_completion() | model=... | n=1        │
 │      │                                                                              │
-│  [REQ_FLOW_06] EngineCore dispatching ADD to scheduler                              │
+│      ├── Validate model exists                                                      │
+│      ├── Create SamplingParams (temperature, max_tokens, etc.)                      │
 │      │                                                                              │
-│  [REQ_FLOW_07] Scheduler.add_request() | num_tokens=6                               │
+│  [REQ_FLOW_03a] InputProcessor.process_inputs() | request_id=cmpl-xxx               │
+│      │                                                                              │
+│      ├── Tokenize: "Hello, how are you?" → [15496, 11, 703, 527, 499, 30]           │
+│      └── Create EngineCoreRequest with all request data                             │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
-                                              │ EngineCore main loop
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  3. ENGINE CORE STEP (runs continuously)                                            │
+│  STEP 3: ASYNC ENGINE ENTRY                                                         │
+│  File: vllm/v1/engine/async_llm.py                                                  │
+│  Function: AsyncLLM.generate()                                                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [REQ_FLOW_03] AsyncLLM.generate() called | request_id=cmpl-xxx                     │
+│      │                                                                              │
+│      ├── This is the MAIN ENTRY POINT to the vLLM engine                            │
+│      ├── Create RequestOutputCollector (queue for receiving outputs)                │
+│      ├── Start output_handler background task                                       │
+│      └── Call add_request() to send to EngineCore                                   │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  STEP 4: ZMQ SEND TO ENGINE CORE                                                    │
+│  File: vllm/v1/engine/core_client.py                                                │
+│  Function: DPLBAsyncMPClient.add_request_async()                                    │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [REQ_FLOW_04b] DPLBAsyncMPClient sending request via ZMQ | request_id=... | dp=0   │
+│      │                                                                              │
+│      │   ┌─────────────────────────────────────────────────────────────────────┐    │
+│      │   │  IPC BOUNDARY - ZeroMQ Socket                                       │    │
+│      │   │                                                                     │    │
+│      │   │  API Server Process  ────────────────►  EngineCore Process          │    │
+│      │   │  (handles HTTP)                          (runs on GPU)              │    │
+│      │   │                                                                     │    │
+│      │   │  Request is serialized and sent via ZMQ to a SEPARATE PROCESS       │    │
+│      │   │  For Data Parallel (DP), routes to one of multiple EngineCores      │    │
+│      │   └─────────────────────────────────────────────────────────────────────┘    │
+│      │                                                                              │
+│  [REQ_FLOW_04] Request added to EngineCore | request_id=cmpl-xxx                    │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              │ ═══════ ZMQ IPC BOUNDARY ═══════
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  STEP 5: ENGINE CORE RECEIVES REQUEST                                               │
+│  File: vllm/v1/engine/core.py                                                       │
+│  Function: EngineCore._handle_client_request()                                      │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │  NOW IN ENGINE CORE PROCESS (DPEngineCoreActor - Ray Actor)                 │    │
+│  │  This process runs on the GPU and does the actual model inference           │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                     │
+│  [REQ_FLOW_05] EngineCore received ADD request via ZMQ | request_id=cmpl-xxx        │
+│      │                                                                              │
+│  [REQ_FLOW_06] EngineCore dispatching ADD to scheduler | request_id=cmpl-xxx        │
+│      │                                                                              │
+│      └── Put request in input_queue for scheduler to process                        │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  STEP 6: SCHEDULER ADDS REQUEST TO QUEUE                                            │
+│  File: vllm/v1/core/sched/scheduler.py                                              │
+│  Function: Scheduler.add_request()                                                  │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [REQ_FLOW_07] Scheduler.add_request() | request_id=cmpl-xxx | num_tokens=6         │
+│      │                                                                              │
+│      │   ┌─────────────────────────────────────────────────────────────────────┐    │
+│      │   │  SCHEDULER QUEUES                                                   │    │
+│      │   │                                                                     │    │
+│      │   │  waiting: [cmpl-xxx] ◄── New request goes here                      │    │
+│      │   │  running: []                                                        │    │
+│      │   │                                                                     │    │
+│      │   │  Request waits until there's GPU memory and compute available       │    │
+│      │   └─────────────────────────────────────────────────────────────────────┘    │
+│      │                                                                              │
+│      └── Request added to "waiting" queue                                           │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  STEP 7: SCHEDULER CREATES BATCH                                                    │
+│  File: vllm/v1/core/sched/scheduler.py                                              │
+│  Function: Scheduler.schedule()                                                     │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
 │  [REQ_FLOW_10] EngineCore.step() - calling scheduler.schedule()                     │
 │      │                                                                              │
 │  [REQ_FLOW_08] Scheduler.schedule() | waiting=1 | running=0                         │
 │      │                                                                              │
-│  [REQ_FLOW_09] Scheduler batch ready | num_new_reqs=1 | total_tokens=6              │
+│      │   ┌─────────────────────────────────────────────────────────────────────┐    │
+│      │   │  BATCH CREATION - This is where vLLM's efficiency comes from        │    │
+│      │   │                                                                     │    │
+│      │   │  • Check which waiting requests can start (have KV cache space)     │    │
+│      │   │  • Allocate KV cache blocks for new requests                        │    │
+│      │   │  • Create SchedulerOutput with batch to execute                     │    │
+│      │   │                                                                     │    │
+│      │   │  PREFILL vs DECODE:                                                 │    │
+│      │   │  • num_new_reqs > 0  →  PREFILL (process full prompt)               │    │
+│      │   │  • num_new_reqs = 0  →  DECODE (generate 1 token per request)       │    │
+│      │   └─────────────────────────────────────────────────────────────────────┘    │
+│      │                                                                              │
+│  [REQ_FLOW_09] Scheduler batch ready | num_new_reqs=1 | num_cached_reqs=0 | tok=6   │
 │      │                                                                              │
 │  [REQ_FLOW_11] EngineCore.step() - executing model | total_tokens=6                 │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
-                                              │ UniProcExecutor (in-process)
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  4. MODEL EXECUTION (Worker + GPUModelRunner)                                       │
+│  STEP 8: GPU WORKER EXECUTES BATCH                                                  │
+│  File: vllm/v1/worker/gpu_worker.py                                                 │
+│  Function: Worker.execute_model()                                                   │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  [REQ_FLOW_13] Worker.execute_model() | rank=0 | total_tokens=6                     │
+│  [REQ_FLOW_13] Worker.execute_model() | rank=0 | local_rank=0 | total_tokens=6      │
 │      │                                                                              │
-│  [REQ_FLOW_14] GPUModelRunner.execute_model() | total_tokens=6                      │
+│      │   ┌─────────────────────────────────────────────────────────────────────┐    │
+│      │   │  GPU WORKER                                                         │    │
+│      │   │                                                                     │    │
+│      │   │  • Each worker handles one GPU                                      │    │
+│      │   │  • For Tensor Parallelism (TP), multiple workers coordinate         │    │
+│      │   │  • Calls model_runner.execute_model() to run the actual model       │    │
+│      │   └─────────────────────────────────────────────────────────────────────┘    │
 │      │                                                                              │
-│      ├── _prepare_inputs()                    # Build input tensors                 │
-│      │                                                                              │
-│  [REQ_FLOW_15] GPUModelRunner._model_forward() starting | num_tokens=8              │
-│      │                                       (padded from 6 to 8 for alignment)     │
-│      │                                                                              │
-│  [MODEL_FLOW_01] DeepseekV2ForCausalLM.forward() | input_ids.shape=[8]              │
-│      │                                                                              │
-│      └── (29 transformer layers with MoE)                                           │
-│                                                                                     │
-│  [MODEL_FLOW_04] DeepseekV2ForCausalLM.forward() complete | hidden_states=[8, 2560] │
-│      │                                                                              │
-│  [REQ_FLOW_16] GPUModelRunner._model_forward() complete                             │
-│      │                                                                              │
-│  [REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting                             │
-│      │                                                                              │
-│  [REQ_FLOW_17] Scheduler.update_from_output() | num_requests=1                      │
+│      └── Calls GPUModelRunner.execute_model()                                       │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
-                                              │ DECODE LOOP (repeats for each token)
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  5. DECODE ITERATIONS (10 times for max_tokens=10)                                  │
+│  STEP 9: MODEL RUNNER PREPARES INPUTS                                               │
+│  File: vllm/v1/worker/gpu_model_runner.py                                           │
+│  Function: GPUModelRunner.execute_model()                                           │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [REQ_FLOW_14] GPUModelRunner.execute_model() | total_tokens=6                      │
+│      │                                                                              │
+│      ├── _update_states(): Update request state (new tokens, finished)              │
+│      │                                                                              │
+│      ├── _prepare_inputs(): Build input tensors                                     │
+│      │       • input_ids: [15496, 11, 703, 527, 499, 30, pad, pad] → shape [8]      │
+│      │       • positions: [0, 1, 2, 3, 4, 5, 6, 7]                                  │
+│      │       • Prepare attention metadata (KV cache pointers, etc.)                 │
+│      │                                                                              │
+│      └── Ready to call model forward                                                │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+╔═════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                     ║
+║  **STEP 10: NEURAL NETWORK FORWARD PASS (PREFILL PHASE)**                           ║
+║  File: vllm/v1/worker/gpu_model_runner.py → model file                              ║
+║                                                                                     ║
+║  ┌─────────────────────────────────────────────────────────────────────────────┐    ║
+║  │  PREFILL PHASE - Process ALL prompt tokens in ONE pass                      │    ║
+║  │                                                                             │    ║
+║  │  • All 6 prompt tokens processed together                                   │    ║
+║  │  • KV cache is populated for all positions                                  │    ║
+║  │  • More compute-intensive than decode                                       │    ║
+║  └─────────────────────────────────────────────────────────────────────────────┘    ║
+║                                                                                     ║
+╚═════════════════════════════════════════════════════════════════════════════════════╝
+│                                                                                     │
+│  [REQ_FLOW_15] GPUModelRunner._model_forward() | phase=PREFILL | num_tokens=8       │
+│      │                                          | new_reqs=1 | cached_reqs=0        │
+│      │                                                                              │
+│      └── self.model(input_ids, positions, ...)                                      │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  STEP 11: MODEL FORWARD (DeepSeek-V2/V3)                                            │
+│  File: vllm/model_executor/models/deepseek_v2.py                                    │
+│  Function: DeepseekV2ForCausalLM.forward()                                          │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [MODEL_FLOW_01] DeepseekV2ForCausalLM.forward() | input_ids.shape=[8]              │
+│      │                                                                              │
+│      │   ┌─────────────────────────────────────────────────────────────────────┐    │
+│      │   │  DeepSeek-V3-Lite Architecture:                                     │    │
+│      │   │                                                                     │    │
+│      │   │  • 27 Transformer layers (2 dense + 25 with MoE)                    │    │
+│      │   │  • Hidden size: 2560                                                │    │
+│      │   │  • 72 routed experts + 8 shared experts per MoE layer               │    │
+│      │   │  • Top-6 expert selection per token                                 │    │
+│      │   └─────────────────────────────────────────────────────────────────────┘    │
+│      │                                                                              │
+│      ├── 1. EMBEDDING: input_ids → hidden_states [8, 2560]                          │
+│      │                                                                              │
+│      ├── 2. TRANSFORMER LAYERS (loop 27 times):                                     │
+│      │       │                                                                      │
+│      │       ├── Self-Attention (with KV cache)                                     │
+│      │       │                                                                      │
+│      │       └── MoE Layer (for layers 2-27) ──────────► SEE STEP 12                │
+│      │                                                                              │
+│      └── 3. FINAL LAYER NORM                                                        │
+│                                                                                     │
+│  [MODEL_FLOW_04] DeepseekV2ForCausalLM.forward() complete | hidden=[8, 2560]        │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              │ (Inside each transformer layer)
+                                              ▼
+╔═════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                     ║
+║  STEP 12: MoE (MIXTURE OF EXPERTS) LAYER - DETAILED                                 ║
+║  File: vllm/model_executor/layers/fused_moe/layer.py                                ║
+║                                                                                     ║
+╚═════════════════════════════════════════════════════════════════════════════════════╝
+│                                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐    │
+│  │                        MoE LAYER ARCHITECTURE                               │    │
+│  │                                                                             │    │
+│  │  Input: hidden_states [num_tokens, 2560]                                    │    │
+│  │                         │                                                   │    │
+│  │                         ▼                                                   │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐    │    │
+│  │  │  STEP 12a: ROUTER (select_experts)                                  │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  router_logits = hidden_states @ router_weights  → [8, 72]          │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  For each token, compute score for all 72 experts                   │    │    │
+│  │  └─────────────────────────────────────────────────────────────────────┘    │    │
+│  │                         │                                                   │    │
+│  │                         ▼                                                   │    │
+│  │  [MOE_FLOW_01] FusedMoE.select_experts() | tokens=8 | top_k=6 | experts=72  │    │
+│  │                         │                                                   │    │
+│  │                         ▼                                                   │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐    │    │
+│  │  │  STEP 12b: TOP-K SELECTION                                          │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  topk_weights, topk_ids = topk(softmax(router_logits), k=6)         │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  Token 0: experts [23, 45, 12, 67, 3, 55] with weights [0.2, ...]   │    │    │
+│  │  │  Token 1: experts [45, 23, 71, 8, 19, 33] with weights [0.3, ...]   │    │    │
+│  │  │  ...                                                                │    │    │
+│  │  └─────────────────────────────────────────────────────────────────────┘    │    │
+│  │                         │                                                   │    │
+│  │                         │  If EPLB enabled:                                 │    │
+│  │                         ▼                                                   │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐    │    │
+│  │  │  STEP 12c: EPLB MAPPING (eplb_map_to_physical_and_record)           │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  [MOE_FLOW_03] MoE calling EPLB | tokens=8 | routing_decisions=48   │    │    │
+│  │  │  [MOE_FLOW_03a] topk_ids BEFORE (logical): [23, 45, 12, ...]        │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  EPLB does TWO things:                                              │    │    │
+│  │  │  1. Map logical expert ID → physical expert ID (for load balance)   │    │    │
+│  │  │  2. Record load statistics (expert_load_view += 1 for each route)   │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  [MOE_FLOW_03b] topk_ids AFTER (physical): [23, 45, 12, ...]        │    │    │
+│  │  │  [MOE_FLOW_03c] expert_load_view updated: sum=48                    │    │    │
+│  │  └─────────────────────────────────────────────────────────────────────┘    │    │
+│  │                         │                                                   │    │
+│  │                         ▼                                                   │    │
+│  │  [MOE_FLOW_02] FusedMoE.forward_impl() | layer=... | tokens=8 | use_ep=True │    │
+│  │                         │                                                   │    │
+│  │                         │  If Expert Parallelism (EP) enabled:              │    │
+│  │                         ▼                                                   │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐    │    │
+│  │  │  STEP 12d: ALL2ALL DISPATCH (distribute tokens to expert GPUs)      │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  [ALL2ALL_FLOW_01] dispatch() | hidden=[8, 2560] | router=[8, 72]   │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  ┌─────────────────────────────────────────────────────────────┐    │    │    │
+│  │  │  │  GPU 0 (experts 0-17)  ◄────┐                               │    │    │    │
+│  │  │  │  GPU 1 (experts 18-35) ◄────┼── All tokens broadcast to all │    │    │    │
+│  │  │  │  GPU 2 (experts 36-53) ◄────┤   GPUs via All2All            │    │    │    │
+│  │  │  │  GPU 3 (experts 54-71) ◄────┘                               │    │    │    │
+│  │  │  └─────────────────────────────────────────────────────────────┘    │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  [ALL2ALL_FLOW_02] dispatch() complete | output_hidden=[32, 2560]   │    │    │
+│  │  └─────────────────────────────────────────────────────────────────────┘    │    │
+│  │                         │                                                   │    │
+│  │                         ▼                                                   │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐    │    │
+│  │  │  STEP 12e: EXPERT COMPUTATION (fused_experts kernel)                │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  Each GPU computes ONLY its local experts:                          │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  for each token:                                                    │    │    │
+│  │  │    for each selected expert (if local to this GPU):                 │    │    │
+│  │  │      gate = linear(hidden, gate_weights[expert])                    │    │    │
+│  │  │      up   = linear(hidden, up_weights[expert])                      │    │    │
+│  │  │      hidden = SiLU(gate) * up                                       │    │    │
+│  │  │      output = linear(hidden, down_weights[expert])                  │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  This is SPARSE computation - only selected experts run!            │    │    │
+│  │  └─────────────────────────────────────────────────────────────────────┘    │    │
+│  │                         │                                                   │    │
+│  │                         ▼                                                   │    │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐    │    │
+│  │  │  STEP 12f: ALL2ALL COMBINE (gather results back)                    │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  [ALL2ALL_FLOW_03] combine() | hidden=[32, 2560]                    │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  All-reduce: sum expert outputs weighted by topk_weights            │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  output[token] = Σ (expert_output[i] × topk_weight[i])              │    │    │
+│  │  │                                                                     │    │    │
+│  │  │  [ALL2ALL_FLOW_04] combine() complete | output=[8, 2560]            │    │    │
+│  │  └─────────────────────────────────────────────────────────────────────┘    │    │
+│  │                         │                                                   │    │
+│  │                         ▼                                                   │    │
+│  │  Output: hidden_states [num_tokens, 2560] (same shape as input)             │    │
+│  │                                                                             │    │
+│  └─────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              │ (After all 27 layers complete)
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  STEP 13: COMPUTE LOGITS & SAMPLE                                                   │
+│  File: vllm/v1/worker/gpu_model_runner.py                                           │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [REQ_FLOW_16] GPUModelRunner._model_forward() complete                             │
+│      │                                                                              │
+│      ├── hidden_states [8, 2560] from model                                         │
+│      │                                                                              │
+│      ├── compute_logits():                                                          │
+│      │       logits = hidden_states[-1] @ lm_head_weights  → [1, vocab_size]        │
+│      │       (Only compute logits for last token position)                          │
+│      │                                                                              │
+│  [REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting                             │
+│      │                                                                              │
+│      └── sample():                                                                  │
+│              next_token = sample(logits, temperature, top_p, ...)                   │
+│              → next_token_id = 358 ("I")                                            │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  STEP 14: UPDATE SCHEDULER STATE                                                    │
+│  File: vllm/v1/core/sched/scheduler.py                                              │
+│  Function: Scheduler.update_from_output()                                           │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  [REQ_FLOW_17] Scheduler.update_from_output() | num_requests=1                      │
+│      │                                                                              │
+│      ├── Extract sampled token IDs from model output                                │
+│      ├── Append new token to request's output_token_ids                             │
+│      ├── Check finish conditions:                                                   │
+│      │       • EOS token generated?                                                 │
+│      │       • max_tokens reached?                                                  │
+│      │       • Stop string found?                                                   │
+│      │                                                                              │
+│      └── Move request: waiting → running (after prefill)                            │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              │ ═══════ PREFILL COMPLETE ═══════
+                                              │
+                                              │ Now enters DECODE LOOP
+                                              ▼
+╔═════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                     ║
+║  **DECODE PHASE - Generate tokens ONE AT A TIME**                                   ║
+║                                                                                     ║
+║  ┌─────────────────────────────────────────────────────────────────────────────┐    ║
+║  │  DECODE vs PREFILL:                                                         │    ║
+║  │                                                                             │    ║
+║  │  PREFILL: Process ALL prompt tokens in ONE forward pass                     │    ║
+║  │           • More tokens per pass (e.g., 6 tokens)                           │    ║
+║  │           • Compute-bound (lots of computation)                             │    ║
+║  │                                                                             │    ║
+║  │  DECODE:  Generate ONE token per request per forward pass                   │    ║
+║  │           • 1 token per request (can batch multiple requests)               │    ║
+║  │           • Memory-bound (reading KV cache)                                 │    ║
+║  │           • Uses cached KV from prefill                                     │    ║
+║  └─────────────────────────────────────────────────────────────────────────────┘    ║
+║                                                                                     ║
+╚═════════════════════════════════════════════════════════════════════════════════════╝
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  DECODE ITERATION 1 of 50 (for max_tokens=50)                                       │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
 │  [REQ_FLOW_10] EngineCore.step() - calling scheduler.schedule()                     │
 │  [REQ_FLOW_08] Scheduler.schedule() | waiting=0 | running=1                         │
-│  [REQ_FLOW_09] Scheduler batch ready | num_cached_reqs=1 | total_tokens=1           │
+│  [REQ_FLOW_09] Scheduler batch | num_new_reqs=0 | num_cached_reqs=1 | total_tok=1   │
 │  [REQ_FLOW_11] EngineCore.step() - executing model | total_tokens=1                 │
 │  [REQ_FLOW_13] Worker.execute_model() | total_tokens=1                              │
 │  [REQ_FLOW_14] GPUModelRunner.execute_model() | total_tokens=1                      │
-│  [REQ_FLOW_15] GPUModelRunner._model_forward() starting | num_tokens=1              │
+│  [REQ_FLOW_15] GPUModelRunner._model_forward() | phase=DECODE | num_tokens=1        │
+│               | new_reqs=0 | cached_reqs=1                                          │
+│                                                                                     │
+│      │   ┌─────────────────────────────────────────────────────────────────────┐    │
+│      │   │  DECODE FORWARD PASS:                                               │    │
+│      │   │                                                                     │    │
+│      │   │  input_ids: [358]  (just the new token "I")                         │    │
+│      │   │  positions: [6]    (next position after prompt)                     │    │
+│      │   │                                                                     │    │
+│      │   │  Through 27 layers:                                                 │    │
+│      │   │  • Attention: reads from KV cache (positions 0-5), writes pos 6     │    │
+│      │   │  • MoE: routes token 358 to its top-6 experts                       │    │
+│      │   │                                                                     │    │
+│      │   │  Output: logits for next token                                      │    │
+│      │   │  Sample: next_token = "am" (token_id=716)                           │    │
+│      │   └─────────────────────────────────────────────────────────────────────┘    │
+│      │                                                                              │
 │  [REQ_FLOW_16] GPUModelRunner._model_forward() complete                             │
 │  [REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting                             │
 │  [REQ_FLOW_17] Scheduler.update_from_output() | num_requests=1                      │
 │                                                                                     │
-│          ... (repeats 10 times until max_tokens reached) ...                        │
+│          ... (repeats 50 times until max_tokens reached) ...                        │
+│                                                                                     │
+│  Generated so far: "I am good. How about you?\n\nAssistant: I am good..."           │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
-                                              │ Output streaming (parallel)
+                                              │ Output sent back via ZMQ (streaming)
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  6. OUTPUT PROCESSING (back to API Server)                                          │
+│  STEP 15: OUTPUT PROCESSING (back to API Server)                                    │
+│  File: vllm/v1/engine/async_llm.py                                                  │
+│  Function: output_handler()                                                         │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│      │   ┌─────────────────────────────────────────────────────────────────────┐    │
+│      │   │  IPC BOUNDARY - ZeroMQ Socket (OUTPUT DIRECTION)                    │    │
+│      │   │                                                                     │    │
+│      │   │  EngineCore Process  ────────────────►  API Server Process          │    │
+│      │   │  (generated tokens)                      (detokenize & respond)     │    │
+│      │   └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                                     │
 │  [REQ_FLOW_18] AsyncLLM output_handler received | num_outputs=1                     │
 │      │                                                                              │
-│  [REQ_FLOW_18a] OutputProcessor.process_outputs() | finished=0   (multiple times)   │
+│  [REQ_FLOW_18a] OutputProcessor.process_outputs() | num_outputs=1 | finished=0      │
 │      │                                                                              │
-│  [REQ_FLOW_18a] OutputProcessor.process_outputs() | finished=1   (final)            │
+│      ├── Detokenize: [358, 716, ...] → "I am good..."                               │
+│      ├── Put RequestOutput into queue for generate() to yield                       │
+│      │                                                                              │
+│      │   (... multiple iterations as tokens stream in ...)                          │
+│      │                                                                              │
+│  [REQ_FLOW_18a] OutputProcessor.process_outputs() | num_outputs=1 | finished=1      │
 │      │                                                                              │
 │  [REQ_FLOW_19] Request complete | request_id=cmpl-xxx                               │
-│      │                                                                              │
-│  HTTP 200 OK → Client receives response                                             │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
                                               │
-                                              │ Background (periodic)
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  7. EPLB LOAD BALANCING (background, every 100 steps for logging)                   │
+│  FINAL: HTTP RESPONSE TO CLIENT                                                     │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  [EPLB_FLOW_01] EplbState.step() | rearrangement_step=X/3000 | window_step=Y/1000   │
-│      │                                                                              │
-│      └── (Every 3000 steps triggers rearrangement: EPLB_FLOW_02, 03, 04)            │
+│  HTTP 200 OK                                                                        │
+│  {                                                                                  │
+│    "id": "cmpl-xxx",                                                                │
+│    "choices": [{                                                                    │
+│      "text": "I am good. How about you?\n\nAssistant: ...",                         │
+│      "finish_reason": "length"                                                      │
+│    }],                                                                              │
+│    "usage": {"prompt_tokens": 6, "completion_tokens": 50, "total_tokens": 56}       │
+│  }                                                                                  │
+│                                                                                     │
+│  Client receives response!                                                          │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+
+╔═════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                     ║
+║  BACKGROUND: EPLB (Expert Parallelism Load Balancer)                                ║
+║                                                                                     ║
+║  EPLB runs IN PARALLEL with the main inference loop, collecting load statistics     ║
+║  from MoE layers and periodically rebalancing expert distribution.                  ║
+║                                                                                     ║
+╚═════════════════════════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  EPLB FLOW - HOW MoE AND EPLB INTERACT                                              │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌───────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                                                               │  │
+│  │                         MoE Layer                    EPLB State               │  │
+│  │                             │                             │                   │  │
+│  │  1. select_experts()        │                             │                   │  │
+│  │     topk_ids = [23,45,12]   │                             │                   │  │
+│  │                             │                             │                   │  │
+│  │  2. eplb_map_to_physical() ─┼─────────────────────────────┤                   │  │
+│  │     • Map logical→physical  │                             │                   │  │
+│  │     • Record in load_view ──┼──────────► expert_load_view │                   │  │
+│  │                             │            [0,0,1,0,0,...]  │                   │  │
+│  │                             │                             │                   │  │
+│  │  3. Expert computation      │                             │                   │  │
+│  │                             │                             │                   │  │
+│  └───────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                     │
+│  ┌───────────────────────────────────────────────────────────────────────────────┐  │
+│  │  EPLB PERIODIC STEPS (every step of EngineCore):                              │  │
+│  │                                                                               │  │
+│  │  [EPLB_FLOW_01a] EplbState.step() ENTRY | total_routing_decisions=48          │  │
+│  │       │                                                                       │  │
+│  │       ├── Every step: Save load to window buffer                              │  │
+│  │       │                                                                       │  │
+│  │  [EPLB_FLOW_01b] Saving MoE load to window | window_slot=147 | load=48        │  │
+│  │  [EPLB_FLOW_01c] Resetting expert_load_pass for next step                     │  │
+│  │       │                                                                       │  │
+│  │       ├── Every 100 steps: Log current state                                  │  │
+│  │       │                                                                       │  │
+│  │  [EPLB_FLOW_01] EplbState.step() | rearrangement_step=2500/3000               │  │
+│  │                 | window_step=147/1000 | total_tokens_layer0=6685428          │  │
+│  │                 | top5_experts=[(72,38416), (55,38415), ...]                  │  │
+│  │       │                                                                       │  │
+│  │       └── Every 3000 steps: TRIGGER REARRANGEMENT                             │  │
+│  │                                                                               │  │
+│  └───────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                     │
+│  ┌───────────────────────────────────────────────────────────────────────────────┐  │
+│  │  EPLB REARRANGEMENT (every 3000 steps):                                       │  │
+│  │                                                                               │  │
+│  │  [EPLB_FLOW_02] EplbState.rearrange() starting                                │  │
+│  │       │                                                                       │  │
+│  │       ├── Aggregate load across window (1000 steps of data)                   │  │
+│  │       │                                                                       │  │
+│  │  [EPLB_FLOW_03] DefaultEplbPolicy.rebalance_experts() | layers=27             │  │
+│  │       │         | logical_experts=72 | physical_replicas=72                   │  │
+│  │       │                                                                       │  │
+│  │       ├── Compute new expert placement based on load                          │  │
+│  │       │   • Hot experts: replicate to multiple GPUs                           │  │
+│  │       │   • Cold experts: consolidate to fewer GPUs                           │  │
+│  │       │                                                                       │  │
+│  │  [EPLB_FLOW_04] rearrange_expert_weights_inplace() | layers=27                │  │
+│  │       │         | physical_experts=72 | ep_rank=0                             │  │
+│  │       │                                                                       │  │
+│  │       └── Actually move expert weights between GPUs                           │  │
+│  │                                                                               │  │
+│  └───────────────────────────────────────────────────────────────────────────────┘  │
 │                                                                                     │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```

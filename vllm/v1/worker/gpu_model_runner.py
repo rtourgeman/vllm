@@ -3281,7 +3281,11 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
-            print(f"[REQ_FLOW_15] GPUModelRunner._model_forward() starting | num_tokens={num_tokens_padded}")
+            # Determine if this is prefill or decode based on tokens per request
+            _num_new = len(scheduler_output.scheduled_new_reqs)
+            _num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
+            _phase = "PREFILL" if _num_new > 0 else "DECODE"
+            print(f"[REQ_FLOW_15] GPUModelRunner._model_forward() starting | phase={_phase} | num_tokens={num_tokens_padded} | new_reqs={_num_new} | cached_reqs={_num_cached}")
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
