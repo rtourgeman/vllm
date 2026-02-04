@@ -657,7 +657,7 @@ The following flow has been **verified with actual trace logs**. Each `[REQ_FLOW
                                               │
                                               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│  DECODE ITERATION 1 of 50 (for max_tokens=50)                                       │
+│  DECODE-LIKE ITERATION (example: generating token 1)                                │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
 │  [REQ_FLOW_10] EngineCore.step() - calling scheduler.schedule()                     │
@@ -670,14 +670,21 @@ The following flow has been **verified with actual trace logs**. Each `[REQ_FLOW
 │               | new_reqs=0 | cached_reqs=1                                          │
 │                                                                                     │
 │      │   ┌─────────────────────────────────────────────────────────────────────┐    │
-│      │   │  DECODE FORWARD PASS:                                               │    │
+│      │   │  DECODE FORWARD PASS (this is STEP 10-11):                          │    │
 │      │   │                                                                     │    │
-│      │   │  input_ids: [358]  (just the new token "I")                         │    │
+│      │   │  input_ids: [358]  (just the new token, e.g., "I")                  │    │
 │      │   │  positions: [6]    (next position after prompt)                     │    │
 │      │   │                                                                     │    │
-│      │   │  Through 27 layers:                                                 │    │
-│      │   │  • Attention: reads from KV cache (positions 0-5), writes pos 6     │    │
-│      │   │  • MoE: routes token 358 to its top-6 experts                       │    │
+│      │   │  Through N transformer layers:                                      │    │
+│      │   │  ┌───────────────────────────────────────────────────────────────┐  │    │
+│      │   │  │  For each layer:                                              │  │    │
+│      │   │  │    • Attention: reads from KV cache, writes new position      │  │    │
+│      │   │  │    • MoE/MLP: if MoE layer → **STEP 12 runs here**            │  │    │
+│      │   │  │                (router → top-k → EPLB map → dispatch →        │  │    │
+│      │   │  │                 expert compute → combine)                     │  │    │
+│      │   │  └───────────────────────────────────────────────────────────────┘  │    │
+│      │   │                                                                     │    │
+│      │   │  STEP 12 runs **num_moe_layers times** per forward pass.            │    │
 │      │   │                                                                     │    │
 │      │   │  Output: logits for next token                                      │    │
 │      │   │  Sample: next_token = "am" (token_id=716)                           │    │
@@ -687,7 +694,7 @@ The following flow has been **verified with actual trace logs**. Each `[REQ_FLOW
 │  [REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting                             │
 │  [REQ_FLOW_17] Scheduler.update_from_output() | num_requests=1                      │
 │                                                                                     │
-│          ... (repeats 50 times until max_tokens reached) ...                        │
+│          ... (this whole iteration repeats until max_tokens / EOS / stop) ...       │
 │                                                                                     │
 │  Generated so far: "I am good. How about you?\n\nAssistant: I am good..."           │
 │                                                                                     │
