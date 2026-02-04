@@ -1538,9 +1538,22 @@ class FusedMoE(CustomOp):
             fused_topk,
             fused_topk_bias,
         )
+        # ==================================================================
+        # PACKET FLOW - STEP 12a: MoE ROUTER (select_experts)
+        # ==================================================================
+        # FROM: DeepseekV2MLP.forward() for each transformer layer
+        # TO:   forward_impl() for expert computation
+        #
+        # This step runs for EACH MoE layer (e.g., 25 times for DeepSeek):
+        #   - Compute router_logits = hidden_states @ router_weights
+        #   - Select top-K experts per token via softmax + topk
+        #   - If EPLB enabled: map logical->physical expert IDs, record load
+        #
+        # NEXT STEP: forward_impl() dispatches to experts (with EP: All2All)
+        # ==================================================================
         # Log only first call per layer to avoid excessive output
         if not hasattr(self, '_moe_logged'):
-            print(f"[MOE_FLOW_01] FusedMoE.select_experts() | layer={self.layer_name} | num_tokens={hidden_states.shape[0]} | top_k={self.top_k} | num_experts={self.global_num_experts} | enable_eplb={self.enable_eplb}")
+            print(f"[STEP 12a - MOE_FLOW_01] FusedMoE.select_experts() | layer={self.layer_name} | num_tokens={hidden_states.shape[0]} | top_k={self.top_k} | num_experts={self.global_num_experts} | enable_eplb={self.enable_eplb}")
             self._moe_logged = True
 
         if self.enable_eplb:
@@ -1633,8 +1646,8 @@ class FusedMoE(CustomOp):
             num_tokens = topk_ids.shape[0]
             num_routing_decisions = topk_ids.numel()  # num_tokens * top_k
             if not hasattr(self, '_eplb_logged'):
-                print(f"[MOE_FLOW_03] MoE calling EPLB | layer={self.layer_name} | num_tokens={num_tokens} | top_k={self.top_k} | routing_decisions={num_routing_decisions}")
-                print(f"[MOE_FLOW_03a]   -> topk_ids BEFORE (logical): shape={topk_ids.shape}, sample={topk_ids[0].tolist() if num_tokens > 0 else 'empty'}")
+                print(f"[STEP 12c - MOE_FLOW_03] MoE calling EPLB | layer={self.layer_name} | num_tokens={num_tokens} | top_k={self.top_k} | routing_decisions={num_routing_decisions}")
+                print(f"[STEP 12c - MOE_FLOW_03a]   -> topk_ids BEFORE (logical): shape={topk_ids.shape}, sample={topk_ids[0].tolist() if num_tokens > 0 else 'empty'}")
                 self._eplb_logged = True
             
             # ═══════════════════════════════════════════════════════════════
@@ -1651,8 +1664,8 @@ class FusedMoE(CustomOp):
             # ═══════════════════════════════════════════════════════════════
             
             if not hasattr(self, '_eplb_return_logged'):
-                print(f"[MOE_FLOW_03b]   <- topk_ids AFTER (physical): shape={topk_ids.shape}, sample={topk_ids[0].tolist() if num_tokens > 0 else 'empty'}")
-                print(f"[MOE_FLOW_03c]   <- expert_load_view updated: sum={self.expert_load_view.sum().item()}")
+                print(f"[STEP 12c - MOE_FLOW_03b]   <- topk_ids AFTER (physical): shape={topk_ids.shape}, sample={topk_ids[0].tolist() if num_tokens > 0 else 'empty'}")
+                print(f"[STEP 12c - MOE_FLOW_03c]   <- expert_load_view updated: sum={self.expert_load_view.sum().item()}")
                 self._eplb_return_logged = True
 
         if (indices_type is not None) and topk_ids.dtype != indices_type:
@@ -1908,9 +1921,24 @@ class FusedMoE(CustomOp):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
+        # ==================================================================
+        # PACKET FLOW - STEP 12: MoE FORWARD IMPLEMENTATION
+        # ==================================================================
+        # FROM: select_experts() after router decision
+        # TO:   fused_experts kernel (local computation)
+        #
+        # This step:
+        #   - STEP 12d: If EP enabled, All2All DISPATCH (gather hidden states)
+        #   - STEP 12e: Expert computation (fused_experts kernel)
+        #   - STEP 12f: If EP enabled, All2All COMBINE (reduce-scatter results)
+        #
+        # Output: hidden_states transformed by selected experts
+        #
+        # NEXT STEP: Return to transformer layer, continue to next layer
+        # ==================================================================
         # Log first forward per layer
         if not hasattr(self, '_forward_logged'):
-            print(f"[MOE_FLOW_02] FusedMoE.forward_impl() | layer={self.layer_name} | tokens={hidden_states.shape[0]} | hidden_size={hidden_states.shape[-1]} | use_ep={self.use_ep} | ep_size={self.ep_size}")
+            print(f"[STEP 12 - MOE_FLOW_02] FusedMoE.forward_impl() | layer={self.layer_name} | tokens={hidden_states.shape[0]} | hidden_size={hidden_states.shape[-1]} | use_ep={self.use_ep} | ep_size={self.ep_size}")
             self._forward_logged = True
 
         self.ensure_moe_quant_config_init()
@@ -2056,7 +2084,7 @@ class FusedMoE(CustomOp):
             if self.shared_experts is not None:
                 # Log MoE layer completion (first time only)
                 if not hasattr(self, '_moe_complete_logged'):
-                    print(f"[MOE_FLOW_04] MoE layer complete | layer={self.layer_name} | (with shared experts)")
+                    print(f"[STEP 12 - MOE_FLOW_04] MoE layer complete | layer={self.layer_name} | (with shared experts)")
                     self._moe_complete_logged = True
                 return (
                     final_hidden_states[0],
@@ -2065,7 +2093,7 @@ class FusedMoE(CustomOp):
             else:
                 # Log MoE layer completion (first time only)
                 if not hasattr(self, '_moe_complete_logged'):
-                    print(f"[MOE_FLOW_04] MoE layer complete | layer={self.layer_name} | output ready for next layer")
+                    print(f"[STEP 12 - MOE_FLOW_04] MoE layer complete | layer={self.layer_name} | output ready for next layer")
                     self._moe_complete_logged = True
                 return combine_output(final_hidden_states)
 

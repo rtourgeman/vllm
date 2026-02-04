@@ -492,13 +492,28 @@ class EplbState:
         """
         ep_group = get_ep_group().device_group
         
+        # ==================================================================
+        # PACKET FLOW - STEP 13a: EPLB STEP (Background Load Balancer)
+        # ==================================================================
+        # FROM: GPUModelRunner.eplb_step() after each model forward
+        # TO:   EplbState.rearrange() when step_interval reached
+        #
+        # EPLB runs IN PARALLEL with inference, collecting load statistics:
+        #   - Every step: Save load from expert_load_pass to window buffer
+        #   - Every ~100 steps: Log current state
+        #   - Every step_interval steps: Trigger rearrangement
+        #
+        # Rearrangement redistributes expert weights across GPUs based on load.
+        #
+        # NEXT STEP: Continue inference or trigger rearrange() if interval hit
+        # ==================================================================
         # Log first step call to show EPLB is receiving data from MoE layers
         if not hasattr(self, '_step_entry_logged'):
             # Get total load collected from MoE layers this step
             total_load = 0
             for eplb_model_state in self.model_states.values():
                 total_load += eplb_model_state.expert_load_pass.sum().item()
-            print(f"[EPLB_FLOW_01a] EplbState.step() ENTRY | is_dummy={is_dummy} | total_routing_decisions_from_MoE={int(total_load)}")
+            print(f"[STEP 13a - EPLB_FLOW_01a] EplbState.step() ENTRY | is_dummy={is_dummy} | total_routing_decisions_from_MoE={int(total_load)}")
             self._step_entry_logged = True
         
         if is_profile:
@@ -557,8 +572,8 @@ class EplbState:
                 # Log first window save to show EPLB storing MoE's data
                 if not hasattr(self, '_window_save_logged'):
                     load_this_step = eplb_model_state.expert_load_pass.sum().item()
-                    print(f"[EPLB_FLOW_01b] Saving MoE load to window | window_slot={self.expert_load_window_step} | load_this_step={int(load_this_step)}")
-                    print(f"[EPLB_FLOW_01c] Resetting expert_load_pass for next step")
+                    print(f"[STEP 13a - EPLB_FLOW_01b] Saving MoE load to window | window_slot={self.expert_load_window_step} | load_this_step={int(load_this_step)}")
+                    print(f"[STEP 13a - EPLB_FLOW_01c] Resetting expert_load_pass for next step")
                     self._window_save_logged = True
                 
                 eplb_model_state.expert_load_window[self.expert_load_window_step] = (
@@ -587,7 +602,7 @@ class EplbState:
                     total_tokens = layer0_load.sum().item()
                     top5_vals, top5_idx = layer0_load.topk(min(5, layer0_load.shape[0]))
                     load_sample = f"total_tokens_layer0={int(total_tokens)} top5_experts={list(zip(top5_idx.tolist(), top5_vals.tolist()))}"
-            print(f"[EPLB_FLOW_01] EplbState.step() | rearrangement_step={self.expert_rearrangement_step}/{self.expert_rearrangement_step_interval} | window_step={self.expert_load_window_step}/{self.expert_load_window_size} | {load_sample}")
+            print(f"[STEP 13a - EPLB_FLOW_01] EplbState.step() | rearrangement_step={self.expert_rearrangement_step}/{self.expert_rearrangement_step_interval} | window_step={self.expert_load_window_step}/{self.expert_load_window_size} | {load_sample}")
 
         if self.is_async:
             for eplb_model_state in self.model_states.values():
@@ -649,7 +664,7 @@ class EplbState:
             rank_mapping (dict[int, int] | None): The rank mapping
                 when scaling is done in EEP.
         """
-        print(f"[EPLB_FLOW_02] EplbState.rearrange() starting | is_profile={is_profile} | is_async={self.is_async}")
+        print(f"[STEP 13a - EPLB_FLOW_02] EplbState.rearrange() starting | is_profile={is_profile} | is_async={self.is_async}")
 
         ep_group = get_ep_group().device_group
         ep_rank = ep_group.rank()

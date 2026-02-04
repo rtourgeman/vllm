@@ -609,7 +609,7 @@ class Worker(WorkerBase):
         #
         # NEXT STEP: model_runner.execute_model() runs the neural network
         # ======================================================================
-        print(f"[REQ_FLOW_13] Worker.execute_model() | rank={self.rank} | local_rank={self.local_rank} | total_tokens={scheduler_output.total_num_scheduled_tokens}")
+        print(f"[STEP 8 - REQ_FLOW_13] Worker.execute_model() | rank={self.rank} | local_rank={self.local_rank} | total_tokens={scheduler_output.total_num_scheduled_tokens}")
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens

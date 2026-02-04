@@ -449,7 +449,7 @@ class InputProcessor:
         priority: int = 0,
         data_parallel_rank: int | None = None,
     ) -> EngineCoreRequest:
-        print(f"[REQ_FLOW_03a] InputProcessor.process_inputs() | request_id={request_id}")
+        print(f"[STEP 3 - REQ_FLOW_03a] InputProcessor.process_inputs() | request_id={request_id}")
         self._validate_lora(lora_request)
         self._validate_params(params)
 

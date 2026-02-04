@@ -2469,7 +2469,7 @@ class GPUModelRunner(
         assert is_mixture_of_experts(model)
         # Log EPLB step call from model runner
         if not hasattr(self, '_eplb_step_logged'):
-            print(f"[EPLB_FLOW_00] GPUModelRunner.eplb_step() called | is_dummy={is_dummy} | is_profile={is_profile}")
+            print(f"[STEP 13a - EPLB_FLOW_00] GPUModelRunner.eplb_step() called | is_dummy={is_dummy} | is_profile={is_profile}")
             self._eplb_step_logged = True
         self.eplb_state.step(
             is_dummy,
@@ -3076,7 +3076,7 @@ class GPUModelRunner(
         #
         # NEXT STEP: _model_forward() calls the model's forward pass
         # ======================================================================
-        print(f"[REQ_FLOW_14] GPUModelRunner.execute_model() | total_tokens={scheduler_output.total_num_scheduled_tokens}")
+        print(f"[STEP 9 - REQ_FLOW_14] GPUModelRunner.execute_model() | total_tokens={scheduler_output.total_num_scheduled_tokens}")
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -3281,11 +3281,24 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
-            # Determine if this is prefill or decode based on tokens per request
+            # ==================================================================
+            # PACKET FLOW - STEP 10: NEURAL NETWORK FORWARD PASS
+            # ==================================================================
+            # FROM: GPUModelRunner.execute_model() after preparing inputs
+            # TO:   DeepseekV2ForCausalLM.forward() -> MoE layers
+            #
+            # This step runs the actual neural network forward pass:
+            #   - PREFILL: Process all prompt tokens in one pass, populate KV cache
+            #   - DECODE: Process one new token per request, read from KV cache
+            #
+            # Inside this call, STEP 11-12 happen (model layers, MoE routing)
+            #
+            # NEXT STEP: Model forward through transformer layers
+            # ==================================================================
             _num_new = len(scheduler_output.scheduled_new_reqs)
             _num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
             _phase = "PREFILL" if _num_new > 0 else "DECODE"
-            print(f"[REQ_FLOW_15] GPUModelRunner._model_forward() starting | phase={_phase} | num_tokens={num_tokens_padded} | new_reqs={_num_new} | cached_reqs={_num_cached}")
+            print(f"[STEP 10 - REQ_FLOW_15] GPUModelRunner._model_forward() starting | phase={_phase} | num_tokens={num_tokens_padded} | new_reqs={_num_new} | cached_reqs={_num_cached}")
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -3293,7 +3306,7 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-            print(f"[REQ_FLOW_16] GPUModelRunner._model_forward() complete")
+            print(f"[STEP 13 - REQ_FLOW_16] GPUModelRunner._model_forward() complete")
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -3371,7 +3384,7 @@ class GPUModelRunner(
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        print(f"[REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting")
+        print(f"[STEP 13 - REQ_FLOW_16a] GPUModelRunner.sample_tokens() starting")
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 

@@ -405,8 +405,21 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
-
-        print(f"[REQ_FLOW_03] AsyncLLM.generate() called | request_id={request_id}")
+        # ==========================================================================
+        # PACKET FLOW - STEP 3: ASYNC ENGINE ENTRY
+        # ==========================================================================
+        # FROM: serving_completion.py or serving_chat.py
+        # TO:   EngineCore via ZMQ IPC (core_client)
+        #
+        # This is the MAIN ENTRY POINT to the vLLM engine.
+        # This step:
+        #   - Creates RequestOutputCollector (queue for receiving outputs)
+        #   - Starts output_handler background task if not running
+        #   - Calls add_request() to send request to EngineCore via ZMQ
+        #
+        # NEXT STEP: core_client.add_request_async() - ZMQ send to EngineCore
+        # ==========================================================================
+        print(f"[STEP 3 - REQ_FLOW_03] AsyncLLM.generate() called | request_id={request_id}")
 
         if (
             self.vllm_config.cache_config.kv_sharing_fast_prefill
@@ -450,7 +463,7 @@ class AsyncLLM(EngineClient):
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
             )
-            print(f"[REQ_FLOW_04] Request added to EngineCore | request_id={request_id}")
+            print(f"[STEP 4 - REQ_FLOW_04] Request added to EngineCore | request_id={request_id}")
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
@@ -464,7 +477,7 @@ class AsyncLLM(EngineClient):
                 # own request cleanup based on finished.
                 finished = out.finished
                 if finished:
-                    print(f"[REQ_FLOW_19] Request complete | request_id={request_id}")
+                    print(f"[STEP 15 - REQ_FLOW_19] Request complete | request_id={request_id}")
                 assert isinstance(out, RequestOutput)
                 yield out
 
@@ -539,7 +552,7 @@ class AsyncLLM(EngineClient):
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
                     if num_outputs > 0:
-                        print(f"[REQ_FLOW_18] AsyncLLM output_handler received | num_outputs={num_outputs}")
+                        print(f"[STEP 15 - REQ_FLOW_18] AsyncLLM output_handler received | num_outputs={num_outputs}")
 
                     iteration_stats = (
                         IterationStats() if (log_stats and num_outputs) else None

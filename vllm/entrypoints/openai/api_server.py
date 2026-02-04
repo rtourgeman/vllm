@@ -546,7 +546,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
     import time as _time
     _req_trace_ts = _time.time_ns()
-    print(f"[REQ_FLOW_01] HTTP /v1/chat/completions received | trace_ts={_req_trace_ts} | model={request.model} | stream={request.stream}")
+    print(f"[STEP 1 - REQ_FLOW_01] HTTP /v1/chat/completions received | trace_ts={_req_trace_ts} | model={request.model} | stream={request.stream}")
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )
@@ -606,7 +606,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     # ==========================================================================
     import time as _time
     _req_trace_ts = _time.time_ns()
-    print(f"[REQ_FLOW_01] HTTP /v1/completions received | trace_ts={_req_trace_ts} | model={request.model} | stream={request.stream}")
+    print(f"[STEP 1 - REQ_FLOW_01] HTTP /v1/completions received | trace_ts={_req_trace_ts} | model={request.model} | stream={request.stream}")
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )

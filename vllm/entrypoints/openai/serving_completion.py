@@ -111,7 +111,21 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
-        print(f"[REQ_FLOW_02] OpenAIServingCompletion.create_completion() | model={request.model} | n={request.n} | max_tokens={request.max_tokens}")
+        # ==========================================================================
+        # PACKET FLOW - STEP 2: REQUEST VALIDATION
+        # ==========================================================================
+        # FROM: api_server.py -> create_completion() HTTP handler
+        # TO:   AsyncLLM.generate() via engine_client
+        #
+        # This step:
+        #   - Validates model exists and is available
+        #   - Creates SamplingParams from request (temperature, max_tokens, etc.)
+        #   - Calls InputProcessor.process_inputs() to tokenize prompt
+        #   - Packages request for engine submission
+        #
+        # NEXT STEP: AsyncLLM.generate() - main vLLM engine entry point
+        # ==========================================================================
+        print(f"[STEP 2 - REQ_FLOW_02] OpenAIServingCompletion.create_completion() | model={request.model} | n={request.n} | max_tokens={request.max_tokens}")
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
