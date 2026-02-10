@@ -401,7 +401,19 @@ class FusedMoE(CustomOp):
             vllm_parallel_config=vllm_config.parallel_config,
         )
 
-        self.global_num_experts = num_experts + num_redundant_experts
+        # Round up total physical experts for ep_size divisibility when
+        # EPLB is enabled. Extra redundant replicas improve load balancing
+        # and the memory footprint is identical (tensors are the same size).
+        ep_size = self.moe_parallel_config.ep_size
+        if enable_eplb and ep_size > 1:
+            global_num_experts, num_redundant_experts = (
+                EplbState.compute_divisible_physical_experts(
+                    num_experts, num_redundant_experts, ep_size
+                )
+            )
+            self.global_num_experts = global_num_experts
+        else:
+            self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
 
         # Expert mapping used in self.load_weights

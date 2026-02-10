@@ -379,9 +379,10 @@ class ElasticEPScalingExecutor:
             )
             eplb_model_state.expert_load_pass = expanded_expert_load_pass
             eplb_model_state.expert_load_window = expanded_expert_load_window
-            # Virtual slot masking: preserve num_active_physical_experts from initial setup
-            # Don't change it - it was set at setup time and should remain constant
-            # num_valid reflects what EPLB considers "usable" for load tracking
+            # Virtual slot masking: preserve num_active_physical_experts from
+            # initial setup. It stores the desired (unpadded) count and should
+            # remain constant. Padding to divisible counts happens transiently
+            # in rearrange() when the EPLB policy is called.
             eplb_state.num_valid_physical_experts = eplb_state.num_active_physical_experts
         else:
             # Scale-down: truncate EPLB state to match new slot count

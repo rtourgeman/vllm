@@ -38,6 +38,7 @@ from vllm.attention.layer import Attention
 from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -278,7 +279,18 @@ class DeepseekV2MoE(nn.Module):
 
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
-        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        if self.enable_eplb and self.ep_size > 1:
+            self.n_physical_experts, self.n_redundant_experts = (
+                EplbState.compute_divisible_physical_experts(
+                    self.n_logical_experts,
+                    self.n_redundant_experts,
+                    self.ep_size,
+                )
+            )
+        else:
+            self.n_physical_experts = (
+                self.n_logical_experts + self.n_redundant_experts
+            )
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
         self.physical_expert_start = self.ep_rank * self.n_local_physical_experts

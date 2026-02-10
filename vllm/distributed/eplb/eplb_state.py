@@ -26,6 +26,7 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import math
 import threading
 import time
 from collections.abc import Sequence
@@ -291,6 +292,161 @@ class EplbState:
                 self.cuda_device_index = torch.cuda.current_device()
 
     @staticmethod
+    def compute_divisible_physical_experts(
+        num_routed_experts: int,
+        num_redundant_experts: int,
+        ep_size: int,
+    ) -> tuple[int, int]:
+        """
+        Round up total physical experts to the nearest multiple of ep_size.
+
+        When (num_routed_experts + num_redundant_experts) is not evenly
+        divisible by ep_size, this increases num_redundant_experts so that
+        the total becomes divisible. The extra redundant replicas improve
+        load balancing by allowing more copies of popular experts.
+
+        Args:
+            num_routed_experts: Number of logical/routed experts.
+            num_redundant_experts: Configured number of redundant experts.
+            ep_size: Number of expert-parallel GPUs.
+
+        Returns:
+            A tuple of (num_physical_experts, adjusted_num_redundant_experts).
+        """
+        raw_total = num_routed_experts + num_redundant_experts
+        if raw_total % ep_size == 0:
+            return raw_total, num_redundant_experts
+        padded_total = math.ceil(raw_total / ep_size) * ep_size
+        return padded_total, padded_total - num_routed_experts
+
+    @staticmethod
+    def trim_excess_slots(
+        phy2log: torch.Tensor,
+        log2phy: torch.Tensor,
+        logcnt: torch.Tensor,
+        num_desired: int,
+        ep_size: int,
+        expert_load: torch.Tensor | None = None,
+    ) -> None:
+        """
+        Trim excess padded slots to inactive (-1).
+
+        After EPLB operates on a padded (divisible) expert count, this
+        function marks the excess slots as inactive. The trimming is
+        deterministic: it distributes trims round-robin starting from
+        the last GPU, and on each GPU picks a slot whose logical expert
+        has replica count > 1 (never removes the last replica).
+
+        When ``expert_load`` is provided (at rebalance time), the slot
+        whose logical expert has the **lowest load** among safe
+        candidates is trimmed -- the replica that would be missed the
+        least. When not provided (at init), the slot with the
+        **highest replica count** is trimmed instead (tiebreak: highest
+        physical index).
+
+        All three mapping tensors are modified **in-place**.
+
+        Args:
+            phy2log: Shape [num_layers, num_padded].
+                Physical-to-logical mapping.
+            log2phy: Shape [num_layers, num_logical, max_replicas].
+                Logical-to-physical mapping.
+            logcnt: Shape [num_layers, num_logical].
+                Replica count per logical expert.
+            num_desired: The original (unpadded) expert count.
+            ep_size: Number of expert-parallel GPUs.
+            expert_load: Optional, shape [num_layers, num_logical].
+                Aggregated load per logical expert. When provided,
+                trimming prefers the least-loaded redundant expert.
+        """
+        num_padded = phy2log.shape[1]
+        excess = num_padded - num_desired
+        if excess <= 0:
+            return
+
+        num_local = num_padded // ep_size
+        num_layers = phy2log.shape[0]
+
+        for layer in range(num_layers):
+            trimmed = 0
+            gpu = ep_size - 1  # start from last GPU
+            attempts = 0  # guard against infinite loop
+            while trimmed < excess:
+                attempts += 1
+                if attempts > excess * ep_size:
+                    logger.warning(
+                        "trim_excess_slots: could not trim %d slots "
+                        "(trimmed %d) -- not enough redundant replicas",
+                        excess, trimmed,
+                    )
+                    break
+
+                gpu_start = gpu * num_local
+                gpu_end = gpu_start + num_local
+                gpu_slots = phy2log[layer, gpu_start:gpu_end]
+
+                # Find active slots on this GPU whose logical expert
+                # has replica count > 1 (never remove the last replica).
+                active_mask = gpu_slots >= 0
+                if not active_mask.any():
+                    gpu = (gpu - 1) % ep_size
+                    continue
+
+                active_local_indices = active_mask.nonzero(as_tuple=True)[0]
+                active_logical = gpu_slots[active_local_indices]
+                active_replicas = logcnt[layer, active_logical.long()]
+
+                # Only consider experts with count > 1
+                safe_mask = active_replicas > 1
+                if not safe_mask.any():
+                    # No trimmable experts on this GPU, try the next
+                    gpu = (gpu - 1) % ep_size
+                    continue
+
+                safe_indices = active_local_indices[safe_mask]
+                safe_logical = active_logical[safe_mask]
+
+                if expert_load is not None:
+                    # Load-aware: trim the replica whose logical expert
+                    # has the lowest load (least impact on routing).
+                    safe_loads = expert_load[layer, safe_logical.long()]
+                    min_load = safe_loads.min()
+                    candidates = (
+                        safe_loads == min_load
+                    ).nonzero(as_tuple=True)[0]
+                    trim_local = safe_indices[candidates[-1]]
+                else:
+                    # No load stats (init): trim the replica with the
+                    # highest replica count (most redundant).
+                    # Tiebreak: highest physical index.
+                    safe_replicas = active_replicas[safe_mask]
+                    max_rep = safe_replicas.max()
+                    candidates = (
+                        safe_replicas == max_rep
+                    ).nonzero(as_tuple=True)[0]
+                    trim_local = safe_indices[candidates[-1]]
+
+                trim_global = gpu_start + trim_local.item()
+                logical_expert = phy2log[layer, trim_global].item()
+
+                # Mark as inactive
+                phy2log[layer, trim_global] = -1
+
+                # Remove from log2phy: find the entry, shift left, pad -1
+                replicas = log2phy[layer, logical_expert]
+                match = (replicas == trim_global).nonzero(as_tuple=True)[0]
+                if len(match) > 0:
+                    idx = match[0].item()
+                    replicas[idx:-1] = replicas[idx + 1:].clone()
+                    replicas[-1] = -1
+
+                # Decrement replica count
+                logcnt[layer, logical_expert] -= 1
+
+                trimmed += 1
+                gpu = (gpu - 1) % ep_size
+
+    @staticmethod
     def build_initial_global_physical_to_logical_map(
         num_routed_experts: int,
         num_redundant_experts: int,
@@ -356,6 +512,13 @@ class EplbState:
         """
         self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
+
+        ep_size = get_ep_group().world_size
+        assert model.num_physical_experts % ep_size == 0, (
+            f"num_physical_experts ({model.num_physical_experts}) must be "
+            f"divisible by ep_size ({ep_size}). Use "
+            f"EplbState.compute_divisible_physical_experts() to round up."
+        )
 
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(
@@ -479,8 +642,31 @@ class EplbState:
             new_logical_replica_count=None,
         )
         self.model_states[model_config.compute_hash()] = model_state
-        self.num_valid_physical_experts = model.num_physical_experts
-        self.num_active_physical_experts = model.num_physical_experts
+
+        # Set num_active_physical_experts to the original (pre-rounding)
+        # desired count. This is the "real" expert count before padding
+        # for ep_size divisibility. The padded slots will be trimmed to -1.
+        desired = (model.num_routed_experts
+                   + self.parallel_config.eplb_config.num_redundant_experts)
+        self.num_active_physical_experts = desired
+        self.num_valid_physical_experts = desired
+
+        # Trim excess padded slots to -1
+        ep_size = get_ep_group().world_size
+        if model.num_physical_experts > desired:
+            self.trim_excess_slots(
+                model_state.physical_to_logical_map,
+                model_state.logical_to_physical_map,
+                model_state.logical_replica_count,
+                desired, ep_size,
+            )
+            # Re-push trimmed mapping to model
+            model.expert_weights.clear()
+            model.set_eplb_state(
+                model_state.expert_load_pass,
+                model_state.logical_to_physical_map,
+                model_state.logical_replica_count,
+            )
 
         # Apply num_active_slots if set (for testing inactive slots)
         # This reuses the virtual slot masking logic from scale-up
@@ -907,12 +1093,13 @@ class EplbState:
         model = eplb_model_state.model
         num_groups = model.num_expert_groups
         
-        # Use active physical experts for EPLB rebalancing (virtual slot masking)
-        # This prevents creating too many redundant replicas after scale-up
+        # Compute the padded replica count for the EPLB policy.
+        # num_active_physical_experts stores the desired (unpadded) count.
+        # The policy always receives a padded (divisible) count.
         if self.num_active_physical_experts > 0:
-            num_replicas = self.num_active_physical_experts
+            desired_active = self.num_active_physical_experts
         else:
-            num_replicas = model.num_physical_experts
+            desired_active = model.num_physical_experts
         
         # Total tensor slots (may be larger than num_replicas after scale-up)
         num_total_physical = model.num_physical_experts
@@ -949,6 +1136,9 @@ class EplbState:
         else:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
+            # Pad desired_active to be divisible by num_gpus for the policy.
+            # The excess will be trimmed back to -1 after the policy returns.
+            num_replicas = math.ceil(desired_active / num_gpus) * num_gpus
 
         if num_gpus % num_nodes != 0:
             num_nodes = 1
@@ -974,6 +1164,20 @@ class EplbState:
                 num_nodes,
                 num_gpus,
             )
+
+            # Trim excess padded slots to -1 (before expansion).
+            # The policy operated on the padded count; now restore the
+            # desired active count by marking excess slots as inactive.
+            # Use load stats to trim the least-loaded redundant replica.
+            trim_excess = num_replicas - desired_active
+            if trim_excess > 0 and rank_mapping is None:
+                self.trim_excess_slots(
+                    new_physical_to_logical_map,
+                    new_logical_to_physical_map,
+                    new_logical_replica_count,
+                    desired_active, num_gpus,
+                    expert_load=global_expert_load_window,
+                )
 
             # Expand active slots to full tensor slots if needed
             # (virtual slot masking for elastic EP scale-up)

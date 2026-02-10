@@ -23,13 +23,18 @@ import torch.nn as nn
 
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_dp_group, get_ep_group
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
+
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
 
 from .utils import log_replacement
 
@@ -246,7 +251,22 @@ class MoEMixin(MixtureOfExperts):
         self.num_moe_layers = 0
         self.num_expert_groups = 1 if num_expert_group is None else num_expert_group
         self.num_logical_experts = num_experts
-        self.num_physical_experts = num_experts + num_redundant_experts
+        raw_total = num_experts + num_redundant_experts
+        if enable_eplb and raw_total % ep_size != 0:
+            self.num_physical_experts, num_redundant_experts = (
+                EplbState.compute_divisible_physical_experts(
+                    num_experts, num_redundant_experts, ep_size
+                )
+            )
+            logger.info(
+                "Rounded num_physical_experts from %d to %d "
+                "(num_redundant_experts adjusted from %d to %d) "
+                "for divisibility by ep_size=%d",
+                raw_total, self.num_physical_experts,
+                raw_total - num_experts, num_redundant_experts, ep_size,
+            )
+        else:
+            self.num_physical_experts = raw_total
         self.num_local_physical_experts = self.num_physical_experts // ep_size
         self.num_routed_experts = num_experts
         self.num_shared_experts = num_shared_experts
