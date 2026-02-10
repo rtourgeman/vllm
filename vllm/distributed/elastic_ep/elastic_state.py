@@ -461,8 +461,17 @@ class ElasticEPScalingState:
             logger.info("[Elastic EP] Synced KV cache memory size to new workers")
 
     def _switch_and_prepare(self):
+        # Pass new_num_redundant_experts via the collective RPC so ALL
+        # workers (old and new) see the same value.  On new workers
+        # self.reconfig_request may be None, so we resolve it here.
+        new_num_redundant = (
+            self.reconfig_request.new_num_redundant_experts
+            if self.reconfig_request is not None
+            else None
+        )
         self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("switch_and_prepare",)
+            "elastic_ep_execute",
+            args=("switch_and_prepare", new_num_redundant),
         )
         old_dp_group = self.old_dp_group
         stateless_destroy_torch_distributed_process_group(old_dp_group)

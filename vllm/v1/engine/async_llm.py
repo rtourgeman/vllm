@@ -830,7 +830,10 @@ class AsyncLLM(EngineClient):
         )
 
     async def scale_elastic_ep(
-        self, new_data_parallel_size: int, drain_timeout: int = 300
+        self,
+        new_data_parallel_size: int,
+        drain_timeout: int = 300,
+        new_num_redundant_experts: int | None = None,
     ):
         """
         Scale up or down the data parallel size by adding or removing
@@ -839,6 +842,9 @@ class AsyncLLM(EngineClient):
             new_data_parallel_size: The new number of data parallel workers
             drain_timeout:
                 Maximum time to wait for requests to drain (seconds)
+            new_num_redundant_experts:
+                New number of redundant experts after scale-up.
+                None means use max capacity (all available slots).
         """
         old_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if old_data_parallel_size == new_data_parallel_size:
@@ -870,7 +876,10 @@ class AsyncLLM(EngineClient):
 
         set_scaling_elastic_ep(True)
         try:
-            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+            await self.engine_core.scale_elastic_ep(
+                new_data_parallel_size,
+                new_num_redundant_experts=new_num_redundant_experts,
+            )
             self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         finally:
             set_scaling_elastic_ep(False)

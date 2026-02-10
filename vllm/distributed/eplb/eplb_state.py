@@ -1140,6 +1140,7 @@ class EplbState:
             # The excess will be trimmed back to -1 after the policy returns.
             num_replicas = math.ceil(desired_active / num_gpus) * num_gpus
 
+
         if num_gpus % num_nodes != 0:
             num_nodes = 1
             logger.warning_once(

@@ -9,9 +9,11 @@ import sys
 import requests
 
 
-def scale(host, port, new_dp_size):
+def scale(host, port, new_dp_size, num_redundant_experts=None):
     url = f"http://{host}:{port}/scale_elastic_ep"
     payload = {"new_data_parallel_size": new_dp_size}
+    if num_redundant_experts is not None:
+        payload["new_num_redundant_experts"] = num_redundant_experts
     headers = {"Content-Type": "application/json"}
 
     print(f"Sending scale request to {url}")
@@ -42,10 +44,17 @@ def main():
     parser.add_argument(
         "--new-dp-size", type=int, default=2, help="New data parallel size"
     )
+    parser.add_argument(
+        "--num-redundant-experts",
+        type=int,
+        default=None,
+        help="New number of redundant experts (None = use max capacity)",
+    )
 
     args = parser.parse_args()
 
-    success = scale(args.host, args.port, args.new_dp_size)
+    success = scale(args.host, args.port, args.new_dp_size,
+                    args.num_redundant_experts)
     sys.exit(0 if success else 1)
 
 

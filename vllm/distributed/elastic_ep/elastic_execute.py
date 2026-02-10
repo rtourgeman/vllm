@@ -241,8 +241,24 @@ class ElasticEPScalingExecutor:
         num_physical_experts = physical_to_logical.shape[1]
         num_local_physical_experts = num_physical_experts // get_ep_group().world_size
         num_logical_experts = eplb_model_state.logical_replica_count.shape[1]
-        # Pass the actual active slot count (from initial setup), not tensor slot count
+
+        # If user specified a new redundant count for scale-up, compute
+        # the new desired_active and broadcast that to new workers so all
+        # ranks agree on num_active_physical_experts before rearrange().
         num_active_physical_experts = eplb_state.num_active_physical_experts
+        if (
+            self.reconfig_request is not None
+            and self.reconfig_request.new_num_redundant_experts is not None
+        ):
+            new_ep_size = self.reconfig_request.new_data_parallel_size
+            num_physical_after = num_local_physical_experts * new_ep_size
+            max_redundant = num_physical_after - num_logical_experts
+            new_redundant = max(
+                0, min(self.reconfig_request.new_num_redundant_experts,
+                       max_redundant)
+            )
+            num_active_physical_experts = num_logical_experts + new_redundant
+
         broadcast_expert_mapping(
             physical_to_logical=physical_to_logical,
             num_local_physical_experts=num_local_physical_experts,
@@ -253,7 +269,9 @@ class ElasticEPScalingExecutor:
             device=self.worker.device,
         )
 
-    def switch_and_prepare(self) -> None:
+    def switch_and_prepare(
+        self, new_num_redundant_experts: int | None = None
+    ) -> None:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
@@ -346,9 +364,26 @@ class ElasticEPScalingExecutor:
 
         num_physical_experts = num_local_experts * new_ep_size
         num_logical_experts = eplb_model_state.logical_replica_count.shape[1]
-        parallel_config.eplb_config.num_redundant_experts = (
-            num_physical_experts - num_logical_experts
-        )
+        max_redundant = num_physical_experts - num_logical_experts
+
+        # Use user-specified redundant count if provided via scale-up
+        # request, otherwise use max capacity (all tensor slots active).
+        # NOTE: new_num_redundant_experts is passed as a parameter (not
+        # read from self.reconfig_request) to ensure ALL workers -- both
+        # old and new -- see the same value during collective execution.
+        new_redundant = new_num_redundant_experts
+        if new_redundant is not None:
+            new_redundant = max(0, min(new_redundant, max_redundant))
+            logger.info(
+                "Scale-up: user requested %d redundant experts "
+                "(max %d, logical %d)",
+                new_redundant, max_redundant, num_logical_experts,
+            )
+        else:
+            new_redundant = max_redundant
+
+        parallel_config.eplb_config.num_redundant_experts = new_redundant
+
         old_physical_to_logical = eplb_model_state.physical_to_logical_map
         num_moe_layers = old_physical_to_logical.shape[0]
         # Calculate how many local experts per GPU for the OLD configuration
@@ -379,11 +414,19 @@ class ElasticEPScalingExecutor:
             )
             eplb_model_state.expert_load_pass = expanded_expert_load_pass
             eplb_model_state.expert_load_window = expanded_expert_load_window
-            # Virtual slot masking: preserve num_active_physical_experts from
-            # initial setup. It stores the desired (unpadded) count and should
-            # remain constant. Padding to divisible counts happens transiently
-            # in rearrange() when the EPLB policy is called.
-            eplb_state.num_valid_physical_experts = eplb_state.num_active_physical_experts
+
+            # Update num_active_physical_experts.
+            # Old workers (reconfig_request present): compute from the
+            # user-specified or default redundant count.
+            # New workers (reconfig_request None): preserve the value
+            # received via broadcast_expert_mapping, which already
+            # reflects the user's choice.
+            if self.reconfig_request is not None:
+                desired_active = num_logical_experts + new_redundant
+                eplb_state.num_active_physical_experts = desired_active
+            eplb_state.num_valid_physical_experts = (
+                eplb_state.num_active_physical_experts
+            )
         else:
             # Scale-down: truncate EPLB state to match new slot count
             assert pad_size < 0
