@@ -501,8 +501,6 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         # Update cached tuple with new values
         NixlEPAll2AllManager._buffer = (buffer, new_ep_size, num_experts_per_rank)
 
-        NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
-
     def get_handle(self, kwargs):
         num_experts_per_rank = kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
         
