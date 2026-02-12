@@ -1638,9 +1638,18 @@ def initialize_model_parallel(
             and config.parallel_config.enable_eplb
         ):
             # Reuse the same group_ranks from EP
-            _EPLB = init_model_parallel_group(
-                group_ranks, get_world_group().local_rank, backend, group_name="eplb"
-            )
+            if enable_elastic_ep:
+                # When elastic EP is enabled, StatelessGroupCoordinator
+                # groups are already independent, so reuse the EP group
+                # for EPLB to avoid exhausting the pre-allocated port list.
+                _EPLB = _EP
+            else:
+                _EPLB = init_model_parallel_group(
+                    group_ranks,
+                    get_world_group().local_rank,
+                    backend,
+                    group_name="eplb",
+                )
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
 

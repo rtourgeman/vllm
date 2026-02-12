@@ -292,15 +292,23 @@ def move_to_buffer(
             if recver_pos < len(ranks_to_recv):
                 recv_ranks.append(ranks_to_recv[recver_pos])
             for dst in recv_ranks:
-                dst_global = rank_to_global[dst]
-                p2p_ops += [
-                    P2POp(
-                        torch.distributed.isend,
-                        w[src],
-                        dst_global,
-                    )
-                    for w in expert_weights
-                ]
+                if is_stateless:
+                    for w in expert_weights:
+                        op = object.__new__(P2POp)
+                        op.op = torch.distributed.isend
+                        op.tensor = w[src]
+                        op.group_peer = dst
+                        p2p_ops.append(op)
+                else:
+                    dst_global = rank_to_global[dst]
+                    p2p_ops += [
+                        P2POp(
+                            torch.distributed.isend,
+                            w[src],
+                            dst_global,
+                        )
+                        for w in expert_weights
+                    ]
 
     # 3. Post recvs
     if recv_count > 0:

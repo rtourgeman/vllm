@@ -45,6 +45,7 @@ from vllm.tracing import instrument
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -84,18 +85,11 @@ class Worker(WorkerBase):
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
-        torch.backends.cuda.matmul.fp32_precision = precision
-        #torch.set_float32_matmul_precision(precision)
+        torch.set_float32_matmul_precision(precision)
 
         from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
 
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
-
-        if self.model_config.trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils.import_utils import init_cached_hf_modules
-
-            init_cached_hf_modules()
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}

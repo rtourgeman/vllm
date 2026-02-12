@@ -44,7 +44,6 @@ def start_async_worker(
                     eplb_group=eplb_group,
                     cuda_stream=cuda_stream,
                     is_profile=is_profile,
-                    rank_mapping=rank_mapping,
                 )
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
@@ -106,7 +105,6 @@ async def transfer_run_periodically(
     eplb_group: ProcessGroup,
     cuda_stream: torch.cuda.Stream = None,
     is_profile: bool = False,
-    rank_mapping: dict[int, int] | None = None,
 ) -> None:
     while True:
         await asyncio.to_thread(state.rearrange_event.wait)
