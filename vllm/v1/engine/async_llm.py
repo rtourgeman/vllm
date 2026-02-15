@@ -658,9 +658,14 @@ class AsyncLLM(EngineClient):
 
         # Ensure that the task doesn't have a circular ref back to the AsyncLLM
         # object, or else it won't be garbage collected and cleaned up properly.
+        # We use a mutable list for logger_manager so that it can be updated
+        # during elastic EP scaling (see scale_elastic_ep) without creating
+        # a circular reference via self.
         engine_core = self.engine_core
         output_processor = self.output_processor
         log_stats = self.log_stats
+        self._logger_ref = [self.logger_manager]
+        logger_ref = self._logger_ref
         input_processor = self.input_processor
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
@@ -704,10 +709,8 @@ class AsyncLLM(EngineClient):
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
-                    if self.logger_manager:
-                        # NOTE(yongji): we need to use self.logger_manager here
-                        # since it can be reinstantiated during scaling up
-                        self.logger_manager.record(
+                    if logger_ref[0]:
+                        logger_ref[0].record(
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
@@ -1038,6 +1041,10 @@ class AsyncLLM(EngineClient):
                 engine_idxs=list(range(new_data_parallel_size)),
                 custom_stat_loggers=None,
             )
+            # Update the mutable ref so output_handler picks up the
+            # new logger without creating a circular reference via self.
+            if hasattr(self, '_logger_ref'):
+                self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
 
         set_scaling_elastic_ep(True)
