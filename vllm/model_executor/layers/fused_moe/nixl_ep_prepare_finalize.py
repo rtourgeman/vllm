@@ -260,8 +260,8 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # Dispatch - use buffer.dispatch instead of buffer.low_latency_dispatch
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
         expert_x, expert_num_tokens, handle, _, hook = self.buffer.dispatch(
-            a1,
-            dispatch_topk_ids,
+            a1.contiguous(),
+            dispatch_topk_ids.contiguous(),
             self.max_tokens_per_rank,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
