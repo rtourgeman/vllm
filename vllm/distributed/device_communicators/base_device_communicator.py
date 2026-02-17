@@ -170,7 +170,11 @@ class DeviceCommunicatorBase:
             use_ep = config.parallel_config.data_parallel_size > 1
             all2all_backend = config.parallel_config.all2all_backend
 
-        self.is_ep_communicator = unique_name == "ep"
+        self.is_ep_communicator = (unique_name == "ep"
+                                   or unique_name.startswith("ep:"))
+        print(f"[DEBUG] DeviceCommunicatorBase: unique_name={unique_name!r}, "
+              f"is_ep_communicator={self.is_ep_communicator}, "
+              f"use_ep={use_ep}, all2all_backend={all2all_backend}")
         self.use_all2all = self.is_ep_communicator and use_ep
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
