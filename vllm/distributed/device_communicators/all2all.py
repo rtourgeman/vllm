@@ -565,10 +565,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             "NIXL EP buffer already initialized"
         )
         buffer = Buffer(
-            nvlink_backend="nixl",
             explicitly_destroy=True,
             rank=self.rank,
-            enable_shrink=True,
         )
         buffer.update_memory_buffers(
             num_ranks=self.max_num_ep_ranks,
