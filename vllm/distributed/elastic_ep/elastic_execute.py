@@ -148,6 +148,23 @@ class ElasticEPScalingExecutor:
         new_dp_size = reconfig_request.new_data_parallel_size
         world_size = self.worker.vllm_config.parallel_config.world_size
         new_world_size_across_dp = world_size * new_dp_size
+
+        # During scale-down, the removed workers' NCCL peers may already be
+        # dead, leaving the old EP group's NCCL communicator in a corrupted
+        # state. Creating new NCCL communicators on the same GPU with stale
+        # NCCL state causes "unhandled cuda error". Destroy the old EP
+        # group's device communicator (NCCL + all2all) before creating new
+        # standby groups. This is safe because EPLB reshuffle (the last
+        # collective using the old EP group) has already completed.
+        # Skip this for scale-up since all old peers are still alive.
+        old_ep_group = get_ep_group()
+        is_scale_down = new_dp_size < old_ep_group.world_size
+        if is_scale_down:
+            if (hasattr(old_ep_group, 'device_communicator')
+                    and old_ep_group.device_communicator is not None):
+                old_ep_group.device_communicator.destroy()
+                old_ep_group.device_communicator = None
+
         # TODO(yongji): check whether we need to use updated vllm_config here
         with set_current_vllm_config(self.worker.vllm_config):
             create_standby_groups(
@@ -377,12 +394,29 @@ class ElasticEPScalingExecutor:
             compilation_counter.stock_torch_compile_count += 1
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
 
-        # release all previously captured CUDA graphs
+        # Release previously captured CUDA graphs but defer recapture
+        # until after EPLB reshuffle, since reshuffle changes expert
+        # mappings which would invalidate any graphs captured here.
         if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
             wrapper = self.worker.model_runner.model
             wrapper.concrete_cudagraph_entries = {}
         elif isinstance(self.worker.model_runner.model, UBatchWrapper):
             raise RuntimeError("DBO is not yet supported in elastic EP")
+
+    def recompile_and_recapture(self) -> None:
+        """Recapture CUDA graphs after expert mappings are finalized
+        (i.e., after EPLB reshuffle). Reuses cached compiled code to
+        avoid recompilation timing differences across workers, which
+        would cause all2all deadlocks during capture.
+
+        This is called as a separate state machine step (RECAPTURE) after
+        EPLB_RESHUFFLE, with a barrier ensuring all workers enter
+        simultaneously so the all2all EP collective ops during capture
+        stay in lockstep.
+        """
+        ep_rank = get_ep_group().rank
+        logger.info("[Elastic EP][EP rank %d] recompile_and_recapture: "
+                     "starting", ep_rank)
 
         multi_block_table = self.worker.model_runner.input_batch.block_table
         saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -392,17 +426,27 @@ class ElasticEPScalingExecutor:
             )
         multi_block_table.clear()
 
-        # reset the compile wrapper
-        torch.compiler.reset()
-        with set_current_vllm_config(self.worker.vllm_config):
-            reset_compile_wrapper(self.worker.model_runner.get_model())
+        # Clear previously captured CUDA graphs (stale expert mappings)
+        # but do NOT reset the compiler -- reuse cached compiled code
+        # so all workers progress through warmup/capture at the same pace.
+        if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
+            wrapper = self.worker.model_runner.model
+            wrapper.concrete_cudagraph_entries = {}
+            logger.info("[Elastic EP][EP rank %d] recompile_and_recapture: "
+                         "cleared %s cuda graph entries", ep_rank,
+                         type(wrapper).__name__)
 
         gc.collect()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
+
+        logger.info("[Elastic EP][EP rank %d] recompile_and_recapture: "
+                     "starting compile_or_warm_up_model", ep_rank)
         unlock_workspace()
         self.worker.compile_or_warm_up_model()
         lock_workspace()
+        logger.info("[Elastic EP][EP rank %d] recompile_and_recapture: "
+                     "compile_or_warm_up_model completed", ep_rank)
 
         for bt, (saved_gpu, saved_cpu) in zip(
             multi_block_table.block_tables, saved_block_tables
@@ -410,8 +454,12 @@ class ElasticEPScalingExecutor:
             bt.block_table.gpu.copy_(saved_gpu)
             bt.block_table.cpu.copy_(saved_cpu)
 
+        logger.info("[Elastic EP][EP rank %d] recompile_and_recapture: "
+                     "done", ep_rank)
+
     def perform_eplb_reshuffle(self, new_dp_size: int | None = None) -> None:
-        if get_ep_group().rank == 0:
+        ep_rank = get_ep_group().rank
+        if ep_rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
 
         eplb_state = self.worker.model_runner.eplb_state
@@ -421,6 +469,8 @@ class ElasticEPScalingExecutor:
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
         is_async_enabled = eplb_state.is_async
         eplb_state.is_async = False
+        logger.info("[Elastic EP][EP rank %d] perform_eplb_reshuffle: "
+                     "starting rearrange", ep_rank)
         if new_dp_size is None:
             eplb_state.rearrange()
         else:
@@ -436,6 +486,8 @@ class ElasticEPScalingExecutor:
             }
 
             eplb_state.rearrange(rank_mapping=rank_mapping)
+        logger.info("[Elastic EP][EP rank %d] perform_eplb_reshuffle: "
+                     "rearrange completed", ep_rank)
         # NOTE(yongji): check whether we need to synchronize here
         torch.cuda.synchronize()
         # reset expert_rearrangement_step to ensure all ranks are synchronized
@@ -445,7 +497,7 @@ class ElasticEPScalingExecutor:
         )
         eplb_state.is_async = is_async_enabled
         self.worker.model_runner.eep_eplb_suppressed = False
-        if get_ep_group().rank == 0:
+        if ep_rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
     def receive_weights(self) -> None:
