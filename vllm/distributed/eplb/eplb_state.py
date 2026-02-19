@@ -966,7 +966,7 @@ class EplbState:
                 start = gpu_idx * slots_per_gpu_display
                 end = start + slots_per_gpu_display
                 preview = layer0_map[start:end]
-                condensed_view.append(f"RANK{gpu_idx}: {preview}")
+                condensed_view.append(f"RANK{gpu_idx}: {preview}") 
             logger.info("[EPLB Rearrange] New physical_to_logical_map (layer 0):\n%s","\n".join(condensed_view),)
 
         return None
