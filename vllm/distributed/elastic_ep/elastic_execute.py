@@ -25,6 +25,7 @@ from vllm.distributed import (
     get_standby_ep_group,
     get_tp_group,
 )
+from vllm.distributed.device_communicators.all2all import pop_backend_timing
 from vllm.distributed.parallel_state import (
     create_standby_groups,
     destroy_old_comm_groups,
@@ -43,36 +44,50 @@ logger = init_logger(__name__)
 
 class SwitchAndPrepareTimer:
     """Detailed timing for switch_and_prepare stages."""
-    
+
     def __init__(self):
         self.stage_times: dict[str, float] = {}
+        self.sub_timings: dict[str, dict[str, float]] = {}
         self.current_stage: str | None = None
         self.stage_start: float = 0
-    
+
     def start(self, stage_name: str):
         if self.current_stage:
             self.end()
         self.current_stage = stage_name
         self.stage_start = time.perf_counter()
-    
+
     def end(self):
         if self.current_stage:
             elapsed = (time.perf_counter() - self.stage_start) * 1000
             self.stage_times[self.current_stage] = elapsed
             self.current_stage = None
-    
+
+    def add_sub_timings(self, parent_stage: str,
+                        sub_timings: dict[str, float]):
+        self.sub_timings[parent_stage] = sub_timings
+
     def log_summary(self, ep_rank: int):
-        if ep_rank != 0:
-            return
-        self.end()  # End any running stage
+        self.end()
         if not self.stage_times:
             return
         total = sum(self.stage_times.values())
-        logger.info("[Elastic EP Timer] --- switch_and_prepare breakdown ---")
+        logger.info(
+            "[Elastic EP Timer] --- switch_and_prepare breakdown "
+            "(ep_rank=%d) ---", ep_rank)
         for stage, duration in self.stage_times.items():
             pct = (duration / total * 100) if total > 0 else 0
-            logger.info(f"[Elastic EP Timer]     {stage}: {duration:.2f}ms ({pct:.1f}%)")
-        logger.info(f"[Elastic EP Timer]     switch_and_prepare total: {total:.2f}ms")
+            logger.info(
+                "[Elastic EP Timer]     %s: %.2fms (%.1f%%)",
+                stage, duration, pct)
+            if stage in self.sub_timings:
+                for sub_name, sub_dur in self.sub_timings[stage].items():
+                    logger.info(
+                        "[Elastic EP Timer]       > %s: %.2fms",
+                        sub_name, sub_dur)
+        logger.info(
+            "[Elastic EP Timer]     switch_and_prepare total: %.2fms "
+            "(ep_rank=%d)", total, ep_rank)
 
 
 def batch_transfer_weights(
@@ -275,13 +290,18 @@ class ElasticEPScalingExecutor:
     def switch_and_prepare(self) -> None:
         timer = SwitchAndPrepareTimer()
         ep_rank = get_ep_group().rank
-        
-        timer.start("switch_to_standby_groups")
+
+        timer.start("destroy_old_comm_groups")
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
         destroy_old_comm_groups()
+        timer.end()
+        destroy_sub = pop_backend_timing("destroy")
+        if destroy_sub:
+            timer.add_sub_timings("destroy_old_comm_groups", destroy_sub)
 
+        timer.start("switch_to_standby_groups")
         switch_to_standby_groups()
 
         parallel_config = self.worker.vllm_config.parallel_config
@@ -409,8 +429,15 @@ class ElasticEPScalingExecutor:
                 if hasattr(module.quant_method, "old_quant_method"):
                     module.quant_method = module.quant_method.old_quant_method
                     module.runner = module._init_runner()
+
+            timer.start("prepare_communication_buffer")
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
-        
+            timer.end()
+            create_sub = pop_backend_timing("create")
+            if create_sub:
+                timer.add_sub_timings("prepare_communication_buffer",
+                                      create_sub)
+
         timer.start("torch_compile")
         if (
             self.worker.vllm_config.compilation_config.mode

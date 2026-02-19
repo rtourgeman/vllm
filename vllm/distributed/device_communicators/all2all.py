@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from typing import Any
 
 import torch
@@ -22,6 +23,19 @@ if has_flashinfer_all2all():
     )
 
 logger = init_logger(__name__)
+
+_backend_timing: dict[str, dict[str, float]] = {}
+
+
+def set_backend_timing(operation: str, timings: dict[str, float]):
+    if operation in _backend_timing:
+        _backend_timing[operation].update(timings)
+    else:
+        _backend_timing[operation] = timings.copy()
+
+
+def pop_backend_timing(operation: str) -> dict[str, float] | None:
+    return _backend_timing.pop(operation, None)
 
 
 class NaiveAll2AllManager(All2AllManagerBase):
@@ -377,10 +391,22 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
         raise NotImplementedError
 
     def destroy(self):
+        t0 = time.perf_counter()
+        num_buffers = 0
         with self.handle_cache._lock:
+            num_buffers = len(self.handle_cache._cache)
             for _, handle in self.handle_cache._cache.items():
                 handle.destroy()
             self.handle_cache._cache.clear()
+        t_destroy = (time.perf_counter() - t0) * 1000
+        if num_buffers > 0:
+            logger.info(
+                "[Elastic EP Timer] DeepEP destroy (ep_rank=%d): "
+                "%d buffer(s) in %.2fms",
+                self.rank, num_buffers, t_destroy)
+            set_backend_timing("destroy", {
+                "deep_ep.destroy": t_destroy,
+            })
 
 
 class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
@@ -425,9 +451,19 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
         buffer_kwargs = self._make_all2all_kwargs()
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
+        is_new = not self.handle_cache.has(buffer_kwargs)
+        t0 = time.perf_counter()
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer
         )
+        if is_new:
+            t_create = (time.perf_counter() - t0) * 1000
+            logger.info(
+                "[Elastic EP Timer] DeepEP-HT create (ep_rank=%d): "
+                "%.2fms", self.rank, t_create)
+            set_backend_timing("create", {
+                "deep_ep_ht.create": t_create,
+            })
         return handle
 
     def set_num_sms(self, num_sms: int):
@@ -498,9 +534,19 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
 
         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
+        is_new = not self.handle_cache.has(buffer_kwargs)
+        t0 = time.perf_counter()
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer
         )
+        if is_new:
+            t_create = (time.perf_counter() - t0) * 1000
+            logger.info(
+                "[Elastic EP Timer] DeepEP-LL create (ep_rank=%d): "
+                "%.2fms", self.rank, t_create)
+            set_backend_timing("create", {
+                "deep_ep_ll.create": t_create,
+            })
         return handle
 
     # DeepEP LL uses RDMA so no SMs are used for communication
@@ -562,18 +608,35 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert NixlEPAll2AllManager._buffer is None, (
             "NIXL EP buffer already initialized"
         )
+
+        t0 = time.perf_counter()
         buffer = Buffer(
             explicitly_destroy=True,
             rank=self.rank,
             tcp_store_group=self.tcp_store_group.store,
         )
+        t_create = (time.perf_counter() - t0) * 1000
+
+        t0 = time.perf_counter()
         buffer.update_memory_buffers(
             num_ranks=self.max_num_ep_ranks,
             num_experts_per_rank=num_experts_per_rank,
             num_rdma_bytes=num_rdma_bytes,
         )
+        t_update = (time.perf_counter() - t0) * 1000
+
         ranks_to_connect = list(range(self.cpu_group.size()))
+        t0 = time.perf_counter()
         buffer.connect_ranks(ranks_to_connect)
+        t_connect = (time.perf_counter() - t0) * 1000
+
+        logger.info(
+            "[Elastic EP Timer] NIXL-EP _init_buffer (ep_rank=%d): "
+            "create=%.2fms, update_memory=%.2fms, "
+            "connect_ranks(%s)=%.2fms",
+            self.rank, t_create, t_update,
+            ranks_to_connect, t_connect)
+
         NixlEPAll2AllManager._buffer = (buffer, self.cpu_group.size())
 
     def _update_buffer(self):
@@ -581,13 +644,38 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         buffer, current_ep_size = NixlEPAll2AllManager._buffer
         current_ranks = list(range(current_ep_size))
         new_ep_size = self.cpu_group.size()
+
+        t0 = time.perf_counter()
         buffer.set_tcp_store_group(self.tcp_store_group.store)
+        t_set_store = (time.perf_counter() - t0) * 1000
+
         if new_ep_size > len(current_ranks):
             ranks_to_connect = list(range(len(current_ranks), new_ep_size))
+            t0 = time.perf_counter()
             buffer.connect_ranks(ranks_to_connect)
+            t_op = (time.perf_counter() - t0) * 1000
+            logger.info(
+                "[Elastic EP Timer] NIXL-EP _update_buffer (ep_rank=%d): "
+                "set_tcp_store=%.2fms, connect_ranks(%s)=%.2fms",
+                self.rank, t_set_store, ranks_to_connect, t_op)
+            set_backend_timing("create", {
+                "nixl_ep.set_tcp_store": t_set_store,
+                "nixl_ep.connect_ranks": t_op,
+            })
         else:
             ranks_to_disconnect = current_ranks[new_ep_size:]
+            t0 = time.perf_counter()
             buffer.disconnect_ranks(ranks_to_disconnect)
+            t_op = (time.perf_counter() - t0) * 1000
+            logger.info(
+                "[Elastic EP Timer] NIXL-EP _update_buffer (ep_rank=%d): "
+                "set_tcp_store=%.2fms, disconnect_ranks(%s)=%.2fms",
+                self.rank, t_set_store, ranks_to_disconnect, t_op)
+            set_backend_timing("create", {
+                "nixl_ep.set_tcp_store": t_set_store,
+                "nixl_ep.disconnect_ranks": t_op,
+            })
+
         NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
 
     def get_handle(self, kwargs):

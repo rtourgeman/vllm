@@ -13,6 +13,11 @@ class Cache:
         self._cache: WeakValueDictionary = WeakValueDictionary()
         self._lock = threading.RLock()  # Reentrant lock for thread safety
 
+    def has(self, kwargs) -> bool:
+        key = tuple(sorted((k, v) for k, v in kwargs.items()))
+        with self._lock:
+            return self._cache.get(key) is not None
+
     def get_or_create(self, kwargs, func):
         # Create a hashable key from the kwargs
         key = tuple(sorted((k, v) for k, v in kwargs.items()))

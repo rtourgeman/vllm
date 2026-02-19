@@ -1051,6 +1051,7 @@ class EplbState:
             model=model,
             model_config=model_config,
         )
+
         eplb_state.num_valid_physical_experts = num_valid_physical_experts
         num_moe_layers = expanded_physical_to_logical.shape[0]
         num_physical_experts = expanded_physical_to_logical.shape[1]

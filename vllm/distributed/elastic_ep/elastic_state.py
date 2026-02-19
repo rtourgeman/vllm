@@ -30,45 +30,57 @@ logger = init_logger(__name__)
 
 class ElasticEPTimer:
     """Timer utility for measuring elastic EP scale-up stages."""
-    
+
     def __init__(self):
         self.stage_times: dict[str, float] = {}
         self.stage_start: dict[str, float] = {}
         self.scale_start_time: float | None = None
-    
-    def start_scale(self):
+        self.dp_rank: int = -1
+
+    def start_scale(self, dp_rank: int):
         """Mark the start of scaling operation."""
+        self.dp_rank = dp_rank
         self.scale_start_time = time.perf_counter()
         self.stage_times.clear()
         self.stage_start.clear()
-    
+
     def start_stage(self, stage_name: str):
         """Start timing a stage."""
         self.stage_start[stage_name] = time.perf_counter()
-    
+
     def end_stage(self, stage_name: str, log: bool = True):
         """End timing a stage and optionally log it."""
         if stage_name not in self.stage_start:
             return
-        elapsed = (time.perf_counter() - self.stage_start[stage_name]) * 1000  # ms
+        elapsed = (time.perf_counter() - self.stage_start[stage_name]) * 1000
         self.stage_times[stage_name] = elapsed
         if log:
-            logger.info(f"[Elastic EP Timer] {stage_name}: {elapsed:.2f}ms")
-    
+            logger.info(
+                "[Elastic EP Timer] %s: %.2fms (dp_rank=%d)",
+                stage_name, elapsed, self.dp_rank)
+
     def log_summary(self):
         """Log a summary of all stage times."""
         if not self.stage_times:
             return
         total = sum(self.stage_times.values())
-        logger.info("[Elastic EP Timer] ========== SCALE-UP TIMING SUMMARY ==========")
+        logger.info(
+            "[Elastic EP Timer] ========== SCALE-UP TIMING SUMMARY "
+            "(dp_rank=%d) ==========", self.dp_rank)
         for stage, duration in self.stage_times.items():
             pct = (duration / total * 100) if total > 0 else 0
-            logger.info(f"[Elastic EP Timer]   {stage}: {duration:.2f}ms ({pct:.1f}%)")
-        logger.info(f"[Elastic EP Timer]   TOTAL (stages): {total:.2f}ms")
+            logger.info(
+                "[Elastic EP Timer]   %s: %.2fms (%.1f%%)",
+                stage, duration, pct)
+        logger.info(
+            "[Elastic EP Timer]   TOTAL (stages): %.2fms", total)
         if self.scale_start_time:
             wall_time = (time.perf_counter() - self.scale_start_time) * 1000
-            logger.info(f"[Elastic EP Timer]   TOTAL (wall): {wall_time:.2f}ms")
-        logger.info("[Elastic EP Timer] =============================================")
+            logger.info(
+                "[Elastic EP Timer]   TOTAL (wall): %.2fms", wall_time)
+        logger.info(
+            "[Elastic EP Timer] =============================="
+            "===================")
 
 
 # Global timer instance for elastic EP operations
@@ -271,10 +283,8 @@ class ElasticEPScalingState:
             return False
 
         elif state == ScaleUpExistingEngineState.CREATE_STANDBY_GROUPS:
-            # Start the timer when we begin the actual scaling work
-            if self.old_dp_group.rank() == 0:
-                _elastic_ep_timer.start_scale()
-                _elastic_ep_timer.start_stage("wait_for_engines_barrier")
+            _elastic_ep_timer.start_scale(self.old_dp_group.rank())
+            _elastic_ep_timer.start_stage("wait_for_engines_barrier")
             # NOTE(yongji): wait for all existing workers to receive the request
             if (
                 int(self.old_dp_store.get("eep_barrier_engine_count"))
@@ -283,8 +293,8 @@ class ElasticEPScalingState:
                 return False
             if not self._staged_barrier(use_new_group=False):
                 return False
+            _elastic_ep_timer.end_stage("wait_for_engines_barrier")
             if self.old_dp_group.rank() == 0:
-                _elastic_ep_timer.end_stage("wait_for_engines_barrier")
                 self.old_dp_store.delete_key("eep_barrier_engine_count")
             self._create_standby_groups()
             self.state = ScaleUpExistingEngineState.TRANSFER_EXPERT_MAPPING
@@ -292,8 +302,7 @@ class ElasticEPScalingState:
 
         elif state == ScaleUpExistingEngineState.TRANSFER_EXPERT_MAPPING:
             self._transfer_expert_mapping()
-            if self.old_dp_group.rank() == 0:
-                _elastic_ep_timer.start_stage("wait_new_workers_init")
+            _elastic_ep_timer.start_stage("wait_new_workers_init")
             self.state = ScaleUpExistingEngineState.WAIT_NEW_CORE_ENGINES_WEIGHTS_INIT
             return True
 
@@ -301,8 +310,7 @@ class ElasticEPScalingState:
             return False
 
         elif state == ScaleUpExistingEngineState.TRANSFER_WEIGHTS:
-            if self.old_dp_group.rank() == 0:
-                _elastic_ep_timer.end_stage("wait_new_workers_init")
+            _elastic_ep_timer.end_stage("wait_new_workers_init")
             if (
                 int(self.old_dp_store.get("eep_barrier_engine_count"))
                 < self.old_dp_group.size()
@@ -334,8 +342,10 @@ class ElasticEPScalingState:
                 < self.new_dp_group.size()
             ):
                 return False
+            _elastic_ep_timer.start_stage("wait_eplb_barrier")
             if not self._staged_barrier(use_new_group=True):
                 return False
+            _elastic_ep_timer.end_stage("wait_eplb_barrier")
             if self.new_dp_group.rank() == 0:
                 self.new_dp_store.delete_key("eep_barrier_engine_count")
             self._eplb_reshuffle()
@@ -352,6 +362,8 @@ class ElasticEPScalingState:
         assert self.new_dp_group is not None
 
         if state == ScaleUpNewEngineState.PREPARE:
+            _elastic_ep_timer.start_scale(self.new_dp_group.rank())
+            _elastic_ep_timer.start_stage("sync_state")
             tensor = torch.tensor([0, 0, 0], dtype=torch.int32, device="cpu")
             torch.distributed.all_reduce(
                 tensor,
@@ -362,6 +374,7 @@ class ElasticEPScalingState:
             self.engine_core.engines_running = bool(data[0])
             self.engine_core.current_wave = int(data[1])
             self.engine_core.step_counter = int(data[2])
+            _elastic_ep_timer.end_stage("sync_state")
             self.state = ScaleUpNewEngineState.EPLB_RESHUFFLE
             self.new_dp_store.add("eep_barrier_engine_count", 1)
             return True
@@ -372,8 +385,10 @@ class ElasticEPScalingState:
                 < self.new_dp_group.size()
             ):
                 return False
+            _elastic_ep_timer.start_stage("wait_eplb_barrier")
             if not self._staged_barrier(use_new_group=True):
                 return False
+            _elastic_ep_timer.end_stage("wait_eplb_barrier")
             assert self.new_dp_group.rank() > 0
             self._eplb_reshuffle()
             self.state = ScaleUpNewEngineState.COMPLETE
@@ -487,8 +502,8 @@ class ElasticEPScalingState:
         self.model_executor.collective_rpc(
             "elastic_ep_execute", args=("create_standby_groups", self.reconfig_request)
         )
+        _elastic_ep_timer.end_stage("create_standby_groups")
         if self.old_dp_group.rank() == 0:
-            _elastic_ep_timer.end_stage("create_standby_groups")
             logger.info("[Elastic EP] Created standby communication groups")
 
     def _transfer_weights(self):
@@ -500,8 +515,8 @@ class ElasticEPScalingState:
         self.model_executor.collective_rpc(
             "elastic_ep_execute", args=("transfer_weights", old_dp_size, new_dp_size)
         )
+        _elastic_ep_timer.end_stage("transfer_weights")
         if self.old_dp_group.rank() == 0:
-            _elastic_ep_timer.end_stage("transfer_weights")
             logger.info("[Elastic EP] Transferred weights to new workers")
 
     def _transfer_expert_mapping(self):
@@ -509,8 +524,8 @@ class ElasticEPScalingState:
         self.model_executor.collective_rpc(
             "elastic_ep_execute", args=("broadcast_expert_mapping",)
         )
+        _elastic_ep_timer.end_stage("transfer_expert_mapping")
         if self.old_dp_group.rank() == 0:
-            _elastic_ep_timer.end_stage("transfer_expert_mapping")
             logger.info("[Elastic EP] Broadcasted expert mapping to new workers")
 
     def _sync_kv_cache_memory_size(self):
@@ -521,8 +536,8 @@ class ElasticEPScalingState:
             self.new_dp_group,
             self.engine_core.available_gpu_memory_for_kv_cache,
         )
+        _elastic_ep_timer.end_stage("sync_kv_cache_memory_size")
         if self.old_dp_group.rank() == 0:
-            _elastic_ep_timer.end_stage("sync_kv_cache_memory_size")
             logger.info("[Elastic EP] Synced KV cache memory size to new workers")
 
     def _switch_and_prepare(self):
@@ -552,8 +567,8 @@ class ElasticEPScalingState:
         self.engine_core.engines_running = bool(data[0])
         self.engine_core.current_wave = int(data[1])
         self.engine_core.step_counter = int(data[2])
+        _elastic_ep_timer.end_stage("switch_and_prepare")
         if new_dp_group.rank() == 0:
-            _elastic_ep_timer.end_stage("switch_and_prepare")
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.RECONFIGURE_FINISHED
             )
@@ -565,10 +580,10 @@ class ElasticEPScalingState:
             "elastic_ep_execute", args=("perform_eplb_reshuffle",)
         )
         assert self.new_dp_group is not None
+        _elastic_ep_timer.end_stage("eplb_reshuffle")
         if self.new_dp_group.rank() == 0:
-            _elastic_ep_timer.end_stage("eplb_reshuffle")
             logger.info("[Elastic EP] EPLB reshuffle completed")
-            _elastic_ep_timer.log_summary()
+        _elastic_ep_timer.log_summary()
 
     def _eplb_reshuffle_before_scale_down(self):
         assert self.reconfig_request is not None
