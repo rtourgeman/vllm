@@ -563,23 +563,20 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         token_hidden_size: int,
         num_experts_per_rank: int,
     ):
-        from nixl_ep import Buffer  # type: ignore[import-not-found]
-        
         assert NixlEPAll2AllManager._buffer is not None
-        buffer, current_ep_size, current_experts_per_rank = NixlEPAll2AllManager._buffer
-        current_ranks = list(range(current_ep_size))
+        buffer, current_ep_size, current_experts_per_rank = (
+            NixlEPAll2AllManager._buffer
+        )
         new_ep_size = self.cpu_group.size()
         buffer.set_tcp_store_group(self.tcp_store_group.store)
-        if new_ep_size > len(current_ranks):
-            ranks_to_connect = list(range(len(current_ranks), new_ep_size))
-            buffer.connect_ranks(ranks_to_connect)
-        elif new_ep_size < len(current_ranks):
-            ranks_to_disconnect = current_ranks[new_ep_size:]
-            buffer.disconnect_ranks(ranks_to_disconnect)
-        
-        # TODO [Ron] maybe we can delete this code need to check this
-        # Handle num_experts_per_rank changes (required for scale-down after scale-up)
+        if new_ep_size > current_ep_size:
+            buffer.connect_ranks(list(range(current_ep_size, new_ep_size)))
+        elif new_ep_size < current_ep_size:
+            buffer.disconnect_ranks(list(range(new_ep_size, current_ep_size)))
+
         if num_experts_per_rank != current_experts_per_rank:
+            from nixl_ep import Buffer  # type: ignore[import-not-found]
+
             logger.info(
                 "[NixlEPAll2AllManager] Reconfiguring buffer: "
                 "num_experts_per_rank %d -> %d",
@@ -597,21 +594,19 @@ class NixlEPAll2AllManager(All2AllManagerBase):
                 num_experts_per_rank=num_experts_per_rank,
                 num_rdma_bytes=num_rdma_bytes,
             )
-        
-        # Update cached tuple with new values
+
         NixlEPAll2AllManager._buffer = (buffer, new_ep_size, num_experts_per_rank)
 
     def get_handle(self, kwargs):
         num_experts_per_rank = kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
-        
-        # Check if cached buffer matches current configuration
+
         if (
             NixlEPAll2AllManager._buffer is not None
             and NixlEPAll2AllManager._buffer[1] == self.cpu_group.size()
             and NixlEPAll2AllManager._buffer[2] == num_experts_per_rank
         ):
-                return NixlEPAll2AllManager._buffer[0]
-        
+            return NixlEPAll2AllManager._buffer[0]
+
         nixl_kwargs = dict(
             max_num_tokens_per_dp_rank=kwargs["max_num_tokens_per_dp_rank"],
             token_hidden_size=kwargs["token_hidden_size"],
