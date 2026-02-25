@@ -1191,8 +1191,6 @@ class EplbState:
             model_config=model_config,
         )
         eplb_state.num_valid_physical_experts = num_valid_physical_experts
-        # Set num_active_physical_experts from sender (for virtual slot masking)
-        # If not provided, default to num_valid_physical_experts
         if num_active_physical_experts is not None:
             eplb_state.num_active_physical_experts = num_active_physical_experts
         else:

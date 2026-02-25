@@ -337,8 +337,8 @@ class Worker(WorkerBase):
         if dummy_weights:
             self.model_runner.setup_eplb_from_mapping(
                 expanded_physical_to_logical,
-                num_active_physical_experts,  # num_valid = num_active for new workers
-                num_active_physical_experts,  # Pass num_active to match existing workers
+                old_num_physical_experts=num_active_physical_experts,
+                num_active_physical_experts=num_active_physical_experts,
             )
             self.model_runner.eep_eplb_suppressed = True
 

@@ -296,38 +296,34 @@ class ElasticEPScalingExecutor:
         else:
             num_local_experts = moe_modules[0].moe_config.num_local_experts
 
+        tp_size = get_tp_group().world_size
+        ep_size = get_ep_group().world_size
+        ep_rank = get_ep_group().rank
+        is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        sp_size = tp_size if is_sequence_parallel else 1
+
         for module in moe_modules:
+            module.moe_config.num_local_experts = num_local_experts
             module.moe_config.num_experts = num_local_experts * new_ep_size
             module.global_num_experts = module.moe_config.num_experts
-            tp_size = get_tp_group().world_size
-            is_sequence_parallel = parallel_config.use_sequence_parallel_moe
-            sp_size = tp_size if is_sequence_parallel else 1
-            module.moe_config.num_local_experts = num_local_experts
-            module.moe_parallel_config = FusedMoEParallelConfig.make(
-                tp_size_=tp_size,
-                pcp_size_=get_pcp_group().world_size,
-                dp_size_=get_dp_group().world_size,
-                sp_size_=sp_size,
-                vllm_parallel_config=parallel_config,
-            )
-            module.moe_config.moe_parallel_config = module.moe_parallel_config
 
-            # CRITICAL: Update ep_size and ep_rank in the parallel config
-            # FusedMoE.ep_size is a @property that reads from moe_parallel_config.ep_size
-            # So we need to update the config, not the module directly
-            ep_size = get_ep_group().world_size
-            ep_rank = get_ep_group().rank
-
-            # Update moe_parallel_config with correct EP values using dataclasses.replace
-            module.moe_parallel_config = replace(
-                module.moe_parallel_config,
+            # FusedMoEParallelConfig.make() may compute stale ep_size from
+            # parallel_config, so patch it with the actual EP group values.
+            moe_parallel_config = replace(
+                FusedMoEParallelConfig.make(
+                    tp_size_=tp_size,
+                    pcp_size_=get_pcp_group().world_size,
+                    dp_size_=get_dp_group().world_size,
+                    sp_size_=sp_size,
+                    vllm_parallel_config=parallel_config,
+                ),
                 ep_size=ep_size,
-                ep_rank=ep_rank
+                ep_rank=ep_rank,
             )
-            module.moe_config.moe_parallel_config = module.moe_parallel_config
+            module.moe_parallel_config = moe_parallel_config
+            module.moe_config.moe_parallel_config = moe_parallel_config
 
-            # Update prepare_finalize.num_dispatchers_ which caches the EP size
-            # This is used by NIXL/DeepEP dispatch to calculate num_local_experts
+            # Update cached EP size used by NIXL/DeepEP dispatch
             if hasattr(module, 'quant_method') and hasattr(module.quant_method, 'fused_experts'):
                 fused_experts = module.quant_method.fused_experts
                 if hasattr(fused_experts, 'prepare_finalize'):
@@ -496,18 +492,20 @@ class ElasticEPScalingExecutor:
         # reset expert_rearrangement_step to ensure all ranks are synchronized
         eplb_state.expert_rearrangement_step = 0
 
-        # For virtual slot masking: num_valid should equal num_active (not tensor slot count)
-        # Only update num_valid if we're NOT using virtual slot masking
-        # (i.e., when num_active equals total tensor slots, or during scale-down)
+        # When virtual slot masking is active (active < total and not
+        # scale-down), num_valid tracks the active subset, not all slots.
         total_tensor_slots = eplb_model_state.physical_to_logical_map.shape[1]
-        if eplb_state.num_active_physical_experts == 0 or \
-           eplb_state.num_active_physical_experts >= total_tensor_slots or \
-           new_dp_size is not None:
-            # No virtual slot masking or scale-down: all slots are valid
-            eplb_state.num_valid_physical_experts = total_tensor_slots
+        masking_active = (
+            eplb_state.num_active_physical_experts > 0
+            and eplb_state.num_active_physical_experts < total_tensor_slots
+            and new_dp_size is None
+        )
+        if masking_active:
+            eplb_state.num_valid_physical_experts = (
+                eplb_state.num_active_physical_experts
+            )
         else:
-            # Virtual slot masking active: only active slots are valid
-            eplb_state.num_valid_physical_experts = eplb_state.num_active_physical_experts
+            eplb_state.num_valid_physical_experts = total_tensor_slots
         eplb_state.is_async = is_async_enabled
         self.worker.model_runner.eep_eplb_suppressed = False
 
