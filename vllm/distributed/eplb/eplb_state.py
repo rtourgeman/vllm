@@ -313,9 +313,10 @@ class EplbState:
         """
         self.num_active_physical_experts: int = 0
         """
-        Number of active physical expert slots for EPLB rebalancing.
-        This is the number of slots that EPLB should actually use when
-        rebalancing.
+        Number of physical expert slots EPLB uses for rebalancing.
+        After scale-up, this may be smaller than the total tensor slots
+        (num_valid_physical_experts) to prevent over-replication.
+        0 means all slots are active (no masking).
         """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
@@ -653,11 +654,17 @@ class EplbState:
         num_total_physical: int,
     ) -> torch.Tensor:
         """
-        Expand EPLB output from active slots to full tensor slots.
+        Expand EPLB output from active-slot space to tensor-slot space.
+
+        After scale-up, each GPU may have more tensor slots than active
+        slots. Active slots are placed in the first positions on each GPU;
+        remaining slots are filled with -1.
         """
         num_layers = active_phy2log.shape[0]
         num_active = active_phy2log.shape[1]
         ep_size = get_ep_group().world_size
+        assert num_active % ep_size == 0
+        assert num_total_physical % ep_size == 0
 
         num_local_active = num_active // ep_size
         num_local_total = num_total_physical // ep_size
@@ -689,27 +696,22 @@ class EplbState:
         num_total_physical: int,
     ) -> torch.Tensor:
         """
-        Remap logical-to-physical indices from active slot space to tensor slot space.
+        Remap logical-to-physical indices from active-slot to tensor-slot
+        numbering, accounting for the gap between active and total slots
+        on each GPU.
         """
         ep_size = get_ep_group().world_size
+        assert num_active % ep_size == 0
+        assert num_total_physical % ep_size == 0
         num_local_active = num_active // ep_size
         num_local_total = num_total_physical // ep_size
 
         remapped = log2phy.clone()
-
-        # Find valid entries (not -1)
         valid_mask = remapped >= 0
-
-        if valid_mask.any():
-            active_indices = remapped[valid_mask]
-
-            gpu_ids = active_indices // num_local_active
-            local_offsets = active_indices % num_local_active
-
-            tensor_indices = gpu_ids * num_local_total + local_offsets
-
-            remapped[valid_mask] = tensor_indices
-
+        active_indices = remapped[valid_mask]
+        gpu_ids = active_indices // num_local_active
+        local_offsets = active_indices % num_local_active
+        remapped[valid_mask] = gpu_ids * num_local_total + local_offsets
         return remapped
 
     def rearrange(
