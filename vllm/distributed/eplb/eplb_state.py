@@ -750,27 +750,21 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
-            # Get the full physical_to_logical_map and expert_load_window
             phy2log_map = eplb_model_state.physical_to_logical_map
             expert_load_window = eplb_model_state.expert_load_window
 
-            # Create mask for valid (non -1) entries in physical_to_logical_map
             valid_mask = phy2log_map >= 0
-
-            # Replace -1 with 0 to avoid index errors, but we'll zero out the load
-            safe_phy2log = torch.where(valid_mask, phy2log_map, torch.zeros_like(phy2log_map))
-
-            # Zero out load for inactive slots (where phy2log is -1)
-            valid_mask_expanded = valid_mask.unsqueeze(0).expand_as(expert_load_window)
-            masked_load = torch.where(valid_mask_expanded, expert_load_window, 
-                                      torch.zeros_like(expert_load_window))
+            # Replace -1 with 0 so scatter_add_ indices are valid;
+            # zero out the corresponding load so they contribute nothing.
+            safe_phy2log = phy2log_map.clamp(min=0)
+            masked_load = expert_load_window * valid_mask.unsqueeze(0)
 
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 eplb_model_state.model.num_moe_layers,
                 eplb_model_state.model.num_logical_experts,
-                dtype=eplb_model_state.expert_load_window.dtype,
-                device=eplb_model_state.expert_load_window.device,
+                dtype=expert_load_window.dtype,
+                device=expert_load_window.device,
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
@@ -861,24 +855,26 @@ class EplbState:
                     eplb_model_state.physical_to_logical_map,
                 )
 
-            # Expand active slots to full tensor slots if needed
-            # (virtual slot masking for elastic EP scale-up)
-            if (
-                num_total_physical > num_replicas
-                and rank_mapping is None
-            ):
-                new_physical_to_logical_map = self.expand_active_to_tensor_slots(
-                    new_physical_to_logical_map,
-                    num_total_physical,
-                )
-                # Remap logical_to_physical_map from active slot space to tensor slot space
-                new_logical_to_physical_map = self._remap_logical_to_physical(
-                    new_logical_to_physical_map,
-                    num_replicas,
-                    num_total_physical,
-                )
+                # Expand active slots to full tensor slots if virtual
+                # slot masking is active (scale-up without scale-down).
+                if (
+                    num_total_physical > num_replicas
+                    and rank_mapping is None
+                ):
+                    new_physical_to_logical_map = (
+                        self.expand_active_to_tensor_slots(
+                            new_physical_to_logical_map,
+                            num_total_physical,
+                        )
+                    )
+                    new_logical_to_physical_map = (
+                        self._remap_logical_to_physical(
+                            new_logical_to_physical_map,
+                            num_replicas,
+                            num_total_physical,
+                        )
+                    )
 
-            if not self.is_async or is_profile:
                 # Update expert weights
                 rearrange_expert_weights_inplace(
                     eplb_model_state.physical_to_logical_map,
