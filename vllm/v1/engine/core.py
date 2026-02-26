@@ -62,6 +62,7 @@ from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
     get_device_indices,
+    make_engine_identity,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -793,7 +794,7 @@ class EngineCoreProc(EngineCore):
         )
 
         self.engine_index = engine_index
-        identity = self.engine_index.to_bytes(length=2, byteorder="little")
+        identity = make_engine_identity(self.engine_index, os.getpid())
         self.engines_running = False
 
         with self._perform_handshakes(

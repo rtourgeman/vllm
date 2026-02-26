@@ -40,12 +40,27 @@ class CoreEngineState(Enum):
     READY = auto()
 
 
+def make_engine_identity(rank: int, pid: int) -> bytes:
+    """Build a ZMQ identity that is unique across engine lifecycles.
+
+    The first 2 bytes encode the DP rank (for matching), and the next
+    4 bytes encode the OS PID (for uniqueness across restarts).
+    """
+    return rank.to_bytes(2, "little") + pid.to_bytes(4, "little")
+
+
+def engine_identity_rank(identity: bytes) -> int:
+    """Extract the DP rank from an engine ZMQ identity."""
+    return int.from_bytes(identity[:2], "little")
+
+
 class CoreEngine:
     """One per data parallel rank, used to track state during handshaking."""
 
     def __init__(self, index: int = 0, local: bool = True):
         self.local = local
-        self.identity = index.to_bytes(2, "little")
+        self.index = index
+        self.identity: bytes | None = None
 
         self.state = CoreEngineState.NEW
 
@@ -1015,12 +1030,13 @@ def wait_for_engine_startup(
 
         # Receive HELLO and READY messages from the input socket.
         eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
-        eng_index = int.from_bytes(eng_identity, "little")
-        engine = next((e for e in core_engines if e.identity == eng_identity), None)
+        eng_index = engine_identity_rank(eng_identity)
+        engine = next((e for e in core_engines if e.index == eng_index), None)
         if engine is None:
             raise RuntimeError(
                 f"Message from engine with unexpected data parallel rank: {eng_index}"
             )
+        engine.identity = eng_identity
         msg = msgspec.msgpack.decode(ready_msg_bytes)
         status, local, headless = msg["status"], msg["local"], msg["headless"]
         if local != engine.local:

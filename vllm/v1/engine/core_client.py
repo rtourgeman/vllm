@@ -48,6 +48,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
+    engine_identity_rank,
     get_engine_zmq_addresses,
     launch_core_engines,
 )
@@ -597,14 +598,10 @@ class MPClient(EngineCoreClient):
             )
 
             # ZMQ identity of each engine that this client will talk to.
-            self.core_engines: list[EngineIdentity] = [
-                rank.to_bytes(2, "little") for rank in self.engine_ranks_managed
-            ]
-
-            # Wait for ready messages from each engine on the input socket.
-            identities = set(self.core_engines)
+            pending_ranks = set(self.engine_ranks_managed)
+            id_by_rank: dict[int, EngineIdentity] = {}
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
-            while identities:
+            while pending_ranks:
                 if not sync_input_socket.poll(
                     timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
                 ):
@@ -613,7 +610,12 @@ class MPClient(EngineCoreClient):
                         "initial message on input socket."
                     )
                 identity, _ = sync_input_socket.recv_multipart()
-                identities.remove(identity)
+                rank = engine_identity_rank(identity)
+                pending_ranks.remove(rank)
+                id_by_rank[rank] = identity
+            self.core_engines: list[EngineIdentity] = [
+                id_by_rank[r] for r in self.engine_ranks_managed
+            ]
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
@@ -1570,18 +1572,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         await asyncio.gather(start_new_worker_future, *reconfig_futures)
         logger.info("[Elastic EP] Successfully started new engines")
 
-        # Create new CoreEngine objects for the new engines
-        new_engine_identities = set()
-        for i in range(cur_data_parallel_size, new_data_parallel_size):
-            new_engine = i.to_bytes(2, "little")
-            self.core_engines.append(new_engine)
-            # NOTE(yongji): we don't update lb_engines here,
-            # we let run_engine_stats_update_task to update it.
-            new_engine_identities.add(new_engine)
-
-        # Wait for ready messages from new engines on the input socket
+        # Wait for ready messages from new engines on the input socket.
+        pending_new_ranks = set(range(cur_data_parallel_size, new_data_parallel_size))
+        new_engine_by_rank: dict[int, EngineIdentity] = {}
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
-        while new_engine_identities:
+        while pending_new_ranks:
             if not sync_input_socket.poll(
                 timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
             ):
@@ -1590,7 +1585,14 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     "message on input socket."
                 )
             identity, _ = sync_input_socket.recv_multipart()
-            new_engine_identities.discard(identity)
+            rank = engine_identity_rank(identity)
+            pending_new_ranks.discard(rank)
+            new_engine_by_rank[rank] = identity
+
+        # NOTE(yongji): we don't update lb_engines here,
+        # we let run_engine_stats_update_task to update it.
+        for i in range(cur_data_parallel_size, new_data_parallel_size):
+            self.core_engines.append(new_engine_by_rank[i])
 
         # NOTE(yongji): Before we schedule any requests on the new workers,
         # we should wait for them to switch to the new setup.
