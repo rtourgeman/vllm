@@ -319,6 +319,14 @@ class ElasticEPScalingExecutor:
             )
             module.moe_config.moe_parallel_config = module.moe_parallel_config
 
+            if hasattr(module, 'quant_method') and hasattr(
+                module.quant_method, 'fused_experts'
+            ):
+                fused_experts = module.quant_method.fused_experts
+                pf = getattr(fused_experts, 'prepare_finalize', None)
+                if pf is not None and hasattr(pf, 'num_dispatchers_'):
+                    pf.num_dispatchers_ = get_ep_group().world_size
+
         # Update EPLB state
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
