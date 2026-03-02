@@ -420,6 +420,9 @@ class ElasticEPScalingExecutor:
             bt.block_table.gpu.copy_(saved_gpu)
             bt.block_table.cpu.copy_(saved_cpu)
 
+        if new_ep_size < old_ep_size:
+            self.worker.model_runner.eep_eplb_suppressed = False
+
     def perform_eplb_reshuffle(self, new_dp_size: int | None = None) -> None:
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
