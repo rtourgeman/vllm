@@ -3110,6 +3110,7 @@ class GPUModelRunner(
         self,
         expanded_physical_to_logical: torch.Tensor,
         old_num_physical_experts: int,
+        num_eplb_replicas: int | None = None,
     ) -> None:
         model = self.get_model()
         assert is_mixture_of_experts(model)
@@ -3121,6 +3122,7 @@ class GPUModelRunner(
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
             num_valid_physical_experts=old_num_physical_experts,
+            num_eplb_replicas=num_eplb_replicas,
         )
 
     def _pool(
