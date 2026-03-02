@@ -32,6 +32,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
@@ -310,6 +311,17 @@ class EplbState:
         actually mapped to logical experts. In elastic EP,
         newly started EP ranks may not have physical experts
         mapped yet.
+        """
+        self.num_eplb_replicas: int | None = None
+        """
+        When set, EPLB rebalances among this many physical slots
+        instead of all tensor slots.  The policy output is then
+        expanded to tensor-slot space with -1 for inactive positions.
+
+        Set during elastic scale-up when tensor slot capacity exceeds
+        the intended expert count.  Preserved across scale-down when
+        the cap fits and divides evenly by the new EP size; dropped
+        to None only when divisibility or capacity makes it invalid.
         """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
@@ -676,25 +688,27 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
-            expert_load_window = eplb_model_state.expert_load_window[
-                :, :, : self.num_valid_physical_experts
-            ]
+            phy2log_map = eplb_model_state.physical_to_logical_map
+            expert_load_window = eplb_model_state.expert_load_window
+
+            valid_mask = phy2log_map >= 0
+            safe_phy2log = phy2log_map.clamp(min=0)
+            masked_load = expert_load_window * valid_mask.unsqueeze(0)
+
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 eplb_model_state.model.num_moe_layers,
                 eplb_model_state.model.num_logical_experts,
-                dtype=eplb_model_state.expert_load_window.dtype,
-                device=eplb_model_state.expert_load_window.device,
+                dtype=expert_load_window.dtype,
+                device=expert_load_window.device,
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=eplb_model_state.physical_to_logical_map[
-                    :, : self.num_valid_physical_experts
-                ]
+                index=safe_phy2log
                 .unsqueeze(0)
-                .expand_as(expert_load_window)
+                .expand_as(masked_load)
                 .long(),
-                src=expert_load_window,
+                src=masked_load,
             )
 
             global_expert_load_window = logical_expert_load_window.sum(dim=0)
@@ -705,7 +719,10 @@ class EplbState:
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
         model = eplb_model_state.model
-        num_replicas = model.num_physical_experts
+        num_total_physical = model.num_physical_experts
+        num_replicas = (self.num_eplb_replicas
+                        if self.num_eplb_replicas is not None
+                        else num_total_physical)
         num_groups = model.num_expert_groups
 
         if rank_mapping is not None and len(rank_mapping) == ep_group.size():
@@ -718,8 +735,8 @@ class EplbState:
             num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
             num_gpus = sum(new_rank != -1 for new_rank in rank_mapping.values())
             num_replicas = (
-                num_replicas // ep_group.size() * num_gpus
-            )  # handle num replicas change
+                num_total_physical // ep_group.size() * num_gpus
+            )
         else:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
@@ -750,6 +767,30 @@ class EplbState:
                     num_gpus,
                     eplb_model_state.physical_to_logical_map,
                 )
+
+                # Expand active-slot output to tensor-slot space when
+                # EPLB operates on fewer replicas than total tensor slots.
+                if (
+                    num_total_physical > num_replicas
+                    and rank_mapping is None
+                ):
+                    ep_size = ep_group.size()
+                    local_active = num_replicas // ep_size
+                    local_total = num_total_physical // ep_size
+                    new_physical_to_logical_map = F.pad(
+                        new_physical_to_logical_map.reshape(
+                            -1, ep_size, local_active),
+                        (0, local_total - local_active),
+                        value=-1,
+                    ).reshape(-1, num_total_physical)
+                    v = new_logical_to_physical_map >= 0
+                    gpu_id = (
+                        new_logical_to_physical_map[v] // local_active
+                    )
+                    new_logical_to_physical_map[v] = (
+                        gpu_id * local_total
+                        + new_logical_to_physical_map[v] % local_active
+                    )
 
                 # Update expert weights
                 rearrange_expert_weights_inplace(
@@ -1056,6 +1097,7 @@ class EplbState:
         parallel_config: ParallelConfig,
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int,
+        num_eplb_replicas: int | None = None,
     ) -> "EplbState":
         eplb_state = cls(
             parallel_config=parallel_config,
@@ -1066,6 +1108,7 @@ class EplbState:
             model_config=model_config,
         )
         eplb_state.num_valid_physical_experts = num_valid_physical_experts
+        eplb_state.num_eplb_replicas = num_eplb_replicas
         num_moe_layers = expanded_physical_to_logical.shape[0]
         num_physical_experts = expanded_physical_to_logical.shape[1]
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
