@@ -322,7 +322,7 @@ class Worker(WorkerBase):
             (
                 expanded_physical_to_logical,
                 num_logical_experts,
-                old_num_physical_experts,
+                num_eplb_replicas,
             ) = self.elastic_ep_executor.receive_expert_mapping()
             num_physical_experts = expanded_physical_to_logical.shape[1]
             self.parallel_config.eplb_config.num_redundant_experts = (
@@ -337,7 +337,9 @@ class Worker(WorkerBase):
 
         if dummy_weights:
             self.model_runner.setup_eplb_from_mapping(
-                expanded_physical_to_logical, old_num_physical_experts
+                expanded_physical_to_logical,
+                old_num_physical_experts=expanded_physical_to_logical.shape[1],
+                num_eplb_replicas=num_eplb_replicas,
             )
             self.model_runner.eep_eplb_suppressed = True
 
