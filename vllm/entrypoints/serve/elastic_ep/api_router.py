@@ -137,8 +137,10 @@ async def set_redundant_experts(raw_request: Request):
         return JSONResponse(
             {"message": f"Set redundant experts to {num_redundant}"}
         )
-    except (ValueError, AssertionError) as e:
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         logger.error("Set redundant experts failed: %s", e)
         raise HTTPException(

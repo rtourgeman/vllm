@@ -1041,6 +1041,12 @@ class AsyncLLM(EngineClient):
             ),
         }
 
+    async def set_redundant_experts(self, num_redundant: int) -> None:
+        """Set the number of redundant experts and trigger EPLB reshuffle."""
+        if num_redundant < 0:
+            raise ValueError("num_redundant_experts must be >= 0")
+        await self.engine_core.set_redundant_experts(num_redundant)
+
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.

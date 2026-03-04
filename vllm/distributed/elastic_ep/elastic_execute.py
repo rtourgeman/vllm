@@ -563,15 +563,6 @@ class ElasticEPScalingExecutor:
         ep_size = get_ep_group().world_size
         new_active = num_logical + num_redundant
 
-        assert new_active <= num_total, (
-            f"active experts ({new_active}) exceeds "
-            f"total tensor slots ({num_total})"
-        )
-        assert new_active % ep_size == 0, (
-            f"active experts ({new_active}) must be "
-            f"divisible by EP size ({ep_size})"
-        )
-
         new_cap = new_active if new_active < num_total else None
         if new_cap == eplb_state.num_eplb_replicas:
             if get_ep_group().rank == 0:
@@ -583,14 +574,18 @@ class ElasticEPScalingExecutor:
             return
 
         eplb_state.num_eplb_replicas = new_cap
-        self.worker.model_runner.eep_eplb_suppressed = True
         if get_ep_group().rank == 0:
             logger.info(
                 "[Elastic EP] Setting redundant experts to %d "
                 "(active=%d, total=%d, cap=%s)",
                 num_redundant, new_active, num_total, new_cap,
             )
-        self.perform_eplb_reshuffle()
+        self.worker.model_runner.eep_eplb_suppressed = True
+        try:
+            self.perform_eplb_reshuffle()
+        except Exception:
+            self.worker.model_runner.eep_eplb_suppressed = False
+            raise
 
     def receive_weights(self) -> None:
         dp_group = get_dp_group()

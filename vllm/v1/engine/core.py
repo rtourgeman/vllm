@@ -1885,6 +1885,31 @@ class DPEngineCoreProc(EngineCoreProc):
         )
         self.process_input_queue_block = False
 
+    def set_redundant_experts(self, num_redundant: int) -> None:
+        parallel_config = self.vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        ep_size = parallel_config.data_parallel_size * tp_size
+        num_logical = self.vllm_config.model_config.get_num_experts()
+        num_redundant_config = parallel_config.eplb_config.num_redundant_experts
+        num_total = num_logical + num_redundant_config
+        new_active = num_logical + num_redundant
+
+        if new_active > num_total:
+            raise ValueError(
+                f"Requested active experts ({new_active}) exceeds "
+                f"total tensor slots ({num_total})"
+            )
+        if new_active % ep_size != 0:
+            raise ValueError(
+                f"Requested active experts ({new_active}) must be "
+                f"divisible by EP size ({ep_size})"
+            )
+
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute",
+            args=("set_redundant_experts", num_redundant),
+        )
+
 
 class EngineCoreActorMixin:
     """
