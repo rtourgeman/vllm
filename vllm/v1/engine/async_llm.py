@@ -982,6 +982,19 @@ class AsyncLLM(EngineClient):
             )
             return
 
+        parallel_config = self.vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        new_ep_size = new_data_parallel_size * tp_size
+        num_routed = self.vllm_config.model_config.get_num_experts()
+        num_redundant = parallel_config.eplb_config.num_redundant_experts
+        if (num_routed + num_redundant) % new_ep_size != 0:
+            raise ValueError(
+                f"Cannot scale to {new_data_parallel_size} DP ranks: "
+                f"{num_routed} routed + {num_redundant} redundant = "
+                f"{num_routed + num_redundant} experts is not evenly "
+                f"divisible by EP size {new_ep_size}"
+            )
+
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
             logger.info(
                 "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
