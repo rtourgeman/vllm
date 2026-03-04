@@ -47,6 +47,7 @@ async def scale_elastic_ep(raw_request: Request):
 
     new_data_parallel_size = body.get("new_data_parallel_size")
     drain_timeout = body.get("drain_timeout", 120)  # Default 2 minutes
+    num_redundant_experts = body.get("num_redundant_experts")
 
     if new_data_parallel_size is None:
         raise HTTPException(
@@ -64,16 +65,21 @@ async def scale_elastic_ep(raw_request: Request):
             status_code=400, detail="drain_timeout must be a positive integer"
         )
 
+    if num_redundant_experts is not None:
+        if not isinstance(num_redundant_experts, int) or num_redundant_experts < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="num_redundant_experts must be a non-negative integer",
+            )
+
     # Set scaling flag to prevent new requests
     set_scaling_elastic_ep(True)
     client = engine_client(raw_request)
     try:
-        await client.scale_elastic_ep(new_data_parallel_size, drain_timeout)
-        return JSONResponse(
-            {
-                "message": f"Scaled to {new_data_parallel_size} data parallel engines",
-            }
+        result = await client.scale_elastic_ep(
+            new_data_parallel_size, drain_timeout, num_redundant_experts
         )
+        return JSONResponse(result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except TimeoutError as e:

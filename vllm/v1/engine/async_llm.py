@@ -964,7 +964,10 @@ class AsyncLLM(EngineClient):
         )
 
     async def scale_elastic_ep(
-        self, new_data_parallel_size: int, drain_timeout: int = 300
+        self,
+        new_data_parallel_size: int,
+        drain_timeout: int = 300,
+        num_redundant_experts: int | None = None,
     ):
         """
         Scale up or down the data parallel size by adding or removing
@@ -973,6 +976,9 @@ class AsyncLLM(EngineClient):
             new_data_parallel_size: The new number of data parallel workers
             drain_timeout:
                 Maximum time to wait for requests to drain (seconds)
+            num_redundant_experts:
+                If set, override the EPLB redundant expert count after
+                scale-up.  Falls back to all slots if not divisible.
         """
         old_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if old_data_parallel_size == new_data_parallel_size:
@@ -1021,10 +1027,19 @@ class AsyncLLM(EngineClient):
 
         set_scaling_elastic_ep(True)
         try:
-            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+            await self.engine_core.scale_elastic_ep(
+                new_data_parallel_size,
+                num_redundant_experts=num_redundant_experts,
+            )
             self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         finally:
             set_scaling_elastic_ep(False)
+
+        return {
+            "message": (
+                f"Scaled to {new_data_parallel_size} data parallel engines"
+            ),
+        }
 
     @property
     def is_running(self) -> bool:

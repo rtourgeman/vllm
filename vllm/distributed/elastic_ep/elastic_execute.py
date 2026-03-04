@@ -238,8 +238,30 @@ class ElasticEPScalingExecutor:
 
         new_ep_size = standby_ep_group.world_size
         old_num_physical = eplb_model_state.expert_load_pass.shape[1]
-        desired = eplb_state.num_eplb_replicas or old_num_physical
-        num_eplb_replicas = desired if desired % new_ep_size == 0 else None
+
+        requested_redundant = (
+            self.reconfig_request.num_redundant_experts
+            if self.reconfig_request is not None
+            else None
+        )
+        if requested_redundant is not None:
+            desired = num_logical_experts + requested_redundant
+        else:
+            desired = eplb_state.num_eplb_replicas or old_num_physical
+
+        new_total = num_local_physical_experts * new_ep_size
+        if desired % new_ep_size == 0 and desired <= new_total:
+            num_eplb_replicas = desired
+        else:
+            num_eplb_replicas = None
+            if requested_redundant is not None and get_ep_group().rank == 0:
+                effective = new_total - num_logical_experts
+                logger.warning(
+                    "[Elastic EP] Requested %d redundant experts not "
+                    "realizable with EP size %d. Fallback activated. "
+                    "EPLB active redundant experts: %d",
+                    requested_redundant, new_ep_size, effective,
+                )
 
         broadcast_expert_mapping(
             physical_to_logical=physical_to_logical,
@@ -393,11 +415,30 @@ class ElasticEPScalingExecutor:
             eplb_model_state.expert_load_pass = expanded_expert_load_pass
             eplb_model_state.expert_load_window = expanded_expert_load_window
             eplb_state.num_valid_physical_experts = old_num_physical_experts
-            desired = eplb_state.num_eplb_replicas or old_num_physical_experts
-            if desired % new_ep_size == 0:
+            requested_redundant = (
+                self.reconfig_request.num_redundant_experts
+                if self.reconfig_request is not None
+                else None
+            )
+            if requested_redundant is not None:
+                desired = num_logical_experts + requested_redundant
+            else:
+                desired = eplb_state.num_eplb_replicas or old_num_physical_experts
+            if (
+                desired % new_ep_size == 0
+                and desired <= num_physical_experts
+            ):
                 eplb_state.num_eplb_replicas = desired
             else:
                 eplb_state.num_eplb_replicas = None
+                if requested_redundant is not None and get_ep_group().rank == 0:
+                    effective = num_physical_experts - num_logical_experts
+                    logger.warning(
+                        "[Elastic EP] Requested %d redundant experts not "
+                        "realizable with EP size %d. Fallback activated. "
+                        "EPLB active redundant experts: %d",
+                        requested_redundant, new_ep_size, effective,
+                    )
         else:
             assert pad_size < 0
             eplb_model_state.expert_load_pass = eplb_model_state.expert_load_pass[
@@ -510,6 +551,46 @@ class ElasticEPScalingExecutor:
         self.worker.model_runner.eep_eplb_suppressed = False
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
+
+    def set_redundant_experts(self, num_redundant: int) -> None:
+        eplb_state = self.worker.model_runner.eplb_state
+        assert eplb_state is not None
+        model_config = self.worker.model_runner.model_config
+        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+
+        num_logical = eplb_model_state.model.num_logical_experts
+        num_total = eplb_model_state.model.num_physical_experts
+        ep_size = get_ep_group().world_size
+        new_active = num_logical + num_redundant
+
+        assert new_active <= num_total, (
+            f"active experts ({new_active}) exceeds "
+            f"total tensor slots ({num_total})"
+        )
+        assert new_active % ep_size == 0, (
+            f"active experts ({new_active}) must be "
+            f"divisible by EP size ({ep_size})"
+        )
+
+        new_cap = new_active if new_active < num_total else None
+        if new_cap == eplb_state.num_eplb_replicas:
+            if get_ep_group().rank == 0:
+                logger.info(
+                    "[Elastic EP] num_eplb_replicas unchanged (%s), "
+                    "skipping reshuffle",
+                    new_cap,
+                )
+            return
+
+        eplb_state.num_eplb_replicas = new_cap
+        self.worker.model_runner.eep_eplb_suppressed = True
+        if get_ep_group().rank == 0:
+            logger.info(
+                "[Elastic EP] Setting redundant experts to %d "
+                "(active=%d, total=%d, cap=%s)",
+                num_redundant, new_active, num_total, new_cap,
+            )
+        self.perform_eplb_reshuffle()
 
     def receive_weights(self) -> None:
         dp_group = get_dp_group()
