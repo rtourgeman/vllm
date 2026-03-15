@@ -1269,3 +1269,49 @@ def wait_for_engine_startup(
             "local" if local else "remote",
             eng_index,
         )
+
+
+def closest_valid_redundancy(
+    requested: int,
+    num_logical: int,
+    ep_size: int,
+    max_total: int,
+) -> int | None:
+    """Return the closest valid redundancy to *requested*.
+
+    A valid redundancy ``N`` satisfies:
+      - ``N >= 0``
+      - ``(num_logical + N) % ep_size == 0``
+      - ``num_logical + N <= max_total``
+
+    Returns ``None`` only when no valid value exists (should not happen
+    in practice because ``num_logical`` is always a multiple of
+    ``ep_size``).
+    """
+    target_active = num_logical + requested
+    lower_active = (target_active // ep_size) * ep_size
+    upper_active = lower_active + ep_size
+
+    min_active = num_logical
+    max_active = (max_total // ep_size) * ep_size
+
+    if max_active < min_active:
+        return None
+
+    lower_valid = min_active <= lower_active <= max_active
+    upper_valid = min_active <= upper_active <= max_active
+
+    if lower_valid and upper_valid:
+        remainder = target_active % ep_size
+        chosen_active = (
+            upper_active if remainder > ep_size - remainder else lower_active
+        )
+        return chosen_active - num_logical
+
+    if lower_valid:
+        return lower_active - num_logical
+
+    if upper_valid:
+        return upper_active - num_logical
+
+    return max_active - num_logical

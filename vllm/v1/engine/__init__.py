@@ -251,6 +251,7 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_master_port: int
     new_data_parallel_master_port_list: list[int]
     coord_store_port: int
+    num_redundant_experts: int | None = None
 
 
 class ReconfigureRankType(enum.IntEnum):
