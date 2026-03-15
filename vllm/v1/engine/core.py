@@ -1795,6 +1795,18 @@ class DPEngineCoreProc(EngineCoreProc):
         )
         self.process_input_queue_block = False
 
+    def set_redundant_experts(self, num_redundant: int) -> None:
+        # Validation is done in AsyncLLM.set_redundant_experts() which
+        # tracks _total_physical_slots accurately across scale operations.
+        # DPEngineCoreProc cannot validate here because its copy of
+        # eplb_config.num_redundant_experts is stale after scale-up
+        # (workers update it in their own process, not in the engine
+        # core process).
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute",
+            args=("set_redundant_experts", num_redundant),
+        )
+
 
 class EngineCoreActorMixin:
     """
