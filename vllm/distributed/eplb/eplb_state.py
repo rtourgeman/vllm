@@ -32,6 +32,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
@@ -311,6 +312,16 @@ class EplbState:
         newly started EP ranks may not have physical experts
         mapped yet.
         """
+        self.num_eplb_replicas: int = 0
+        """
+        Number of physical slots EPLB actively rebalances among.
+        Slots beyond this count are padded with -1 (inactive).
+
+        Transient 0 until add_model() or from_mapping() sets the real
+        value.  After that, always a positive integer equal to
+        num_physical_experts at full capacity, or less when capped.
+        Must never be read while still 0.
+        """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
@@ -514,6 +525,12 @@ class EplbState:
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
 
+        assert self.num_eplb_replicas in (0, model.num_physical_experts), (
+            f"num_eplb_replicas already set to {self.num_eplb_replicas}, "
+            f"cannot change to {model.num_physical_experts}"
+        )
+        self.num_eplb_replicas = model.num_physical_experts
+
     def step(
         self,
         is_dummy: bool = False,
@@ -676,25 +693,27 @@ class EplbState:
         # Map the physical expert load to global logical experts
         global_expert_load_windows = []
         for eplb_model_state in self.model_states.values():
-            expert_load_window = eplb_model_state.expert_load_window[
-                :, :, : self.num_valid_physical_experts
-            ]
+            phy2log_map = eplb_model_state.physical_to_logical_map
+            expert_load_window = eplb_model_state.expert_load_window
+
+            valid_mask = phy2log_map >= 0
+            safe_phy2log = phy2log_map.clamp(min=0)
+            masked_load = expert_load_window * valid_mask.unsqueeze(0)
+
             logical_expert_load_window = torch.zeros(
                 self.expert_load_window_size,
                 eplb_model_state.model.num_moe_layers,
                 eplb_model_state.model.num_logical_experts,
-                dtype=eplb_model_state.expert_load_window.dtype,
-                device=eplb_model_state.expert_load_window.device,
+                dtype=expert_load_window.dtype,
+                device=expert_load_window.device,
             )
             logical_expert_load_window.scatter_add_(
                 dim=-1,
-                index=eplb_model_state.physical_to_logical_map[
-                    :, : self.num_valid_physical_experts
-                ]
+                index=safe_phy2log
                 .unsqueeze(0)
-                .expand_as(expert_load_window)
+                .expand_as(masked_load)
                 .long(),
-                src=expert_load_window,
+                src=masked_load,
             )
 
             global_expert_load_window = logical_expert_load_window.sum(dim=0)
@@ -705,7 +724,12 @@ class EplbState:
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
         model = eplb_model_state.model
-        num_replicas = model.num_physical_experts
+        num_total_physical = model.num_physical_experts
+        num_replicas = self.num_eplb_replicas
+        assert num_replicas > 0, (
+            "num_eplb_replicas is still 0 — add_model() or from_mapping() "
+            "must run before rearrange()"
+        )
         num_groups = model.num_expert_groups
 
         if rank_mapping is not None and len(rank_mapping) == ep_group.size():
@@ -718,8 +742,8 @@ class EplbState:
             num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
             num_gpus = sum(new_rank != -1 for new_rank in rank_mapping.values())
             num_replicas = (
-                num_replicas // ep_group.size() * num_gpus
-            )  # handle num replicas change
+                num_total_physical // ep_group.size() * num_gpus
+            )
         else:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
@@ -750,6 +774,30 @@ class EplbState:
                     num_gpus,
                     eplb_model_state.physical_to_logical_map,
                 )
+
+                # Expand active-slot output to tensor-slot space when
+                # EPLB operates on fewer replicas than total tensor slots.
+                if (
+                    num_total_physical > num_replicas
+                    and rank_mapping is None
+                ):
+                    ep_size = ep_group.size()
+                    local_active = num_replicas // ep_size
+                    local_total = num_total_physical // ep_size
+                    new_physical_to_logical_map = F.pad(
+                        new_physical_to_logical_map.reshape(
+                            -1, ep_size, local_active),
+                        (0, local_total - local_active),
+                        value=-1,
+                    ).reshape(-1, num_total_physical)
+                    v = new_logical_to_physical_map >= 0
+                    gpu_id = (
+                        new_logical_to_physical_map[v] // local_active
+                    )
+                    new_logical_to_physical_map[v] = (
+                        gpu_id * local_total
+                        + new_logical_to_physical_map[v] % local_active
+                    )
 
                 # Update expert weights
                 rearrange_expert_weights_inplace(
@@ -1056,6 +1104,7 @@ class EplbState:
         parallel_config: ParallelConfig,
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int,
+        num_eplb_replicas: int,
     ) -> "EplbState":
         eplb_state = cls(
             parallel_config=parallel_config,
@@ -1066,6 +1115,7 @@ class EplbState:
             model_config=model_config,
         )
         eplb_state.num_valid_physical_experts = num_valid_physical_experts
+        eplb_state.num_eplb_replicas = num_eplb_replicas
         num_moe_layers = expanded_physical_to_logical.shape[0]
         num_physical_experts = expanded_physical_to_logical.shape[1]
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
