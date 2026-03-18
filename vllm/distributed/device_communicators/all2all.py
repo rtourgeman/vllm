@@ -471,9 +471,46 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
         )
         ranks_to_connect = list(range(self.cpu_group.size()))
-        buffer.connect_ranks(ranks_to_connect)
-        buffer.barrier()
+        self._serialized_connect(buffer, ranks_to_connect)
         NixlEPAll2AllManager._buffer = (buffer, self.cpu_group.size())
+
+    def _serialized_connect(self, buffer, ranks_to_connect):
+        """Connect ranks one at a time in deterministic order.
+
+        Diagnostic: serializes the NIXL rebuild path so only one rank
+        is inside connect_ranks / memory-view rebuild at a time.
+        """
+        import time
+        ep_size = self.cpu_group.size()
+        store = self.tcp_store_group.store
+        key_prefix = f"nixl_serial_connect/{ep_size}"
+
+        for turn in range(ep_size):
+            if self.rank == turn:
+                logger.info(
+                    "[NIXL-SERIAL] rank %d: my turn (turn=%d/%d), "
+                    "calling connect_ranks(%s)",
+                    self.rank, turn, ep_size, ranks_to_connect,
+                )
+                buffer.connect_ranks(ranks_to_connect)
+                store.set(f"{key_prefix}/done/{turn}", "1")
+                logger.info(
+                    "[NIXL-SERIAL] rank %d: connect_ranks done", self.rank,
+                )
+            else:
+                while True:
+                    try:
+                        store.get(f"{key_prefix}/done/{turn}")
+                        break
+                    except Exception:
+                        time.sleep(0.01)
+
+        # All ranks done -- barrier to sync before continuing
+        buffer.barrier()
+        logger.info(
+            "[NIXL-SERIAL] rank %d: all ranks rebuilt, barrier passed",
+            self.rank,
+        )
 
     def _update_buffer(self):
         assert NixlEPAll2AllManager._buffer is not None
@@ -483,8 +520,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         buffer.set_tcp_store_group(self.tcp_store_group.store)
         if new_ep_size > len(current_ranks):
             ranks_to_connect = list(range(len(current_ranks), new_ep_size))
-            buffer.connect_ranks(ranks_to_connect)
-            buffer.barrier()
+            self._serialized_connect(buffer, ranks_to_connect)
         else:
             ranks_to_disconnect = current_ranks[new_ep_size:]
             buffer.disconnect_ranks(ranks_to_disconnect)
