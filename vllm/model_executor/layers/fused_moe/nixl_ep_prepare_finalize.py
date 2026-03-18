@@ -268,7 +268,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             round_scale=self.use_ue8m0_dispatch,
             use_ue8m0=self.use_ue8m0_dispatch,
             async_finish=False,
-            return_recv_hook=True,
+            return_recv_hook=False,
         )
         self.handles[a2a_idx] = handle
 
@@ -361,7 +361,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             handle,
             async_finish=False,
             zero_copy=False,
-            return_recv_hook=do_recv_hook,
+            return_recv_hook=False,
             out=output,
         )
 
