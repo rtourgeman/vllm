@@ -472,6 +472,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         )
         ranks_to_connect = list(range(self.cpu_group.size()))
         buffer.connect_ranks(ranks_to_connect)
+        buffer.barrier()
         NixlEPAll2AllManager._buffer = (buffer, self.cpu_group.size())
 
     def _update_buffer(self):
@@ -483,6 +484,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         if new_ep_size > len(current_ranks):
             ranks_to_connect = list(range(len(current_ranks), new_ep_size))
             buffer.connect_ranks(ranks_to_connect)
+            buffer.barrier()
         else:
             ranks_to_disconnect = current_ranks[new_ep_size:]
             buffer.disconnect_ranks(ranks_to_disconnect)
