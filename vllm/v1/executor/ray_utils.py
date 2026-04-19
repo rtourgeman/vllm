@@ -8,6 +8,7 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING, Union
 
 import numpy as np
+import torch
 
 import vllm.platforms
 from vllm.config import ParallelConfig
@@ -63,6 +64,7 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
+            self._compute_stream: "torch.cuda.Stream | None" = None
 
         rpc_rank: int
 
@@ -106,7 +108,7 @@ try:
         def setup_device_if_necessary(self):
             # TODO(swang): This is needed right now because Ray CG executes
             # on a background thread, so we need to reset torch's current
-            # device.
+            # device and stream.
             # We can remove this API after it is fixed in compiled graph.
             assert self.worker is not None, "Worker is not initialized"
             if not self.compiled_dag_cuda_device_set:
@@ -116,8 +118,14 @@ try:
                 else:
                     assert self.worker.device is not None
                     current_platform.set_device(self.worker.device)
+                    if self._compute_stream is not None:
+                        torch.cuda.set_stream(self._compute_stream)
 
                 self.compiled_dag_cuda_device_set = True
+
+        def save_compute_stream(self):
+            """Save the current CUDA stream to later reuse."""
+            self._compute_stream = torch.cuda.current_stream()
 
         def execute_model_ray(
             self,

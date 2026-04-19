@@ -124,6 +124,7 @@ class Executor(ABC):
         compilation_times: list[CompilationTimes] = self.collective_rpc(
             "compile_or_warm_up_model"
         )
+        self.collective_rpc("save_compute_stream")
         # Propagate compilation time from workers back to the main process.
         # With TP>1, compilation happens in worker processes, so the main
         # process config is never updated. Use max across workers since they

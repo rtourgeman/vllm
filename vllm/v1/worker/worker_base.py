@@ -310,6 +310,9 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
+    def save_compute_stream(self):
+        pass
+
     def init_device(self):
         assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):
