@@ -313,7 +313,8 @@ class ElasticEPScalingExecutor:
             wrapper.concrete_cudagraph_entries = {}
 
         elif isinstance(self.worker.model_runner.model, UBatchWrapper):
-            raise RuntimeError("DBO is not yet supported in elastic EP")
+            wrapper = self.worker.model_runner.model
+            wrapper.clear_graphs()
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
