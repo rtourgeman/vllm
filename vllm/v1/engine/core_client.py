@@ -204,7 +204,11 @@ class EngineCoreClient(ABC):
         running state."""
         raise NotImplementedError
 
-    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def scale_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        on_removed_requests: Callable[[list[str]], None] | None = None,
+    ) -> None:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -1479,7 +1483,37 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     ) -> None:
         await self._send_input(EngineCoreRequestType.ABORT, request_ids, engine)
 
-    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
+    def _pop_requests_on_removed_engines(
+        self, new_data_parallel_size: int
+    ) -> list[str]:
+        """Remove and return request IDs assigned to removed DP engines.
+
+        The returned IDs are internal request IDs from ``reqs_in_flight``. For
+        parallel sampling (``n > 1``), these may be child internal request IDs.
+        Callers that abort via OutputProcessor must coalesce child IDs to their
+        parent internal request ID first, otherwise ParentRequest bookkeeping can
+        leak. This must run before ``core_engines`` is truncated and before
+        reconfiguration, because it relies on the pre-truncation engine identity
+        mapping.
+        """
+        removed_engines = set(self.core_engines[new_data_parallel_size:])
+
+        removed_req_ids = [
+            req_id
+            for req_id, engine in self.reqs_in_flight.items()
+            if engine in removed_engines
+        ]
+
+        for req_id in removed_req_ids:
+            self.reqs_in_flight.pop(req_id, None)
+
+        return removed_req_ids
+
+    async def scale_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        on_removed_requests: Callable[[list[str]], None] | None = None,
+    ) -> None:
         """Scale elastic EP data parallel size"""
         cur_data_parallel_size = len(self.core_engines)
 
@@ -1500,7 +1534,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
         else:
             await self._scale_down_elastic_ep(
-                cur_data_parallel_size, new_data_parallel_size
+                cur_data_parallel_size,
+                new_data_parallel_size,
+                on_removed_requests,
             )
 
     async def _eep_wait_for_setup_switch_complete(self) -> None:
@@ -1633,7 +1669,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
 
     async def _scale_down_elastic_ep(
-        self, cur_data_parallel_size: int, new_data_parallel_size: int
+        self,
+        cur_data_parallel_size: int,
+        new_data_parallel_size: int,
+        on_removed_requests: Callable[[list[str]], None] | None = None,
     ) -> None:
         """Scale down the data parallel size by shutting down and
         reconfiguring existing engine cores."""
@@ -1651,6 +1690,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
         assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
         self.resources.engine_manager.remove_run_refs_for_scale_down(removed_dp_size)
+
+        # Requests already routed to engines being removed cannot complete once
+        # those engines shut down. Return their internal request IDs to the
+        # frontend so OutputProcessor can emit the correct terminal abort output
+        # for both generation and pooling requests.
+        removed_req_ids = self._pop_requests_on_removed_engines(new_data_parallel_size)
+        if removed_req_ids and on_removed_requests is not None:
+            on_removed_requests(removed_req_ids)
+
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
             reconfig_request = ReconfigureDistributedRequest(

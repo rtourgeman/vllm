@@ -999,8 +999,68 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         set_scaling_elastic_ep(True)
+        aborted_removed_req_ids: set[str] = set()
+        aborted_removed_target_ids: set[str] = set()
+
+        def abort_removed_requests(request_ids: list[str]) -> None:
+            incoming_ids: list[str] = []
+            seen_incoming_ids: set[str] = set()
+            for incoming_id in request_ids:
+                if (
+                    incoming_id in aborted_removed_req_ids
+                    or incoming_id in seen_incoming_ids
+                ):
+                    continue
+                seen_incoming_ids.add(incoming_id)
+                incoming_ids.append(incoming_id)
+
+            if not incoming_ids:
+                return
+
+            aborted_removed_req_ids.update(incoming_ids)
+            target_ids: list[str] = []
+            seen_target_ids: set[str] = set()
+
+            for incoming_id in incoming_ids:
+                target_id = incoming_id
+                req_state = self.output_processor.request_states.get(incoming_id)
+                # For n>1, abort the parent so OutputProcessor clears its
+                # ParentRequest bookkeeping while aborting all child requests.
+                # This also aborts sibling children on surviving engines; they
+                # may keep computing until natural termination, but their
+                # outputs are dropped because their RequestState is gone. That
+                # is acceptable for now because n>1 cannot return a partial
+                # result set on this scale-down abort path.
+                if req_state is not None and req_state.parent_req is not None:
+                    parent_req = req_state.parent_req
+                    target_id = parent_req.request_id
+                    aborted_removed_req_ids.update(parent_req.child_requests)
+                if (
+                    target_id not in aborted_removed_target_ids
+                    and target_id not in seen_target_ids
+                ):
+                    seen_target_ids.add(target_id)
+                    target_ids.append(target_id)
+
+            # All reported IDs may have been handled by an earlier callback.
+            if not target_ids:
+                return
+            aborted_removed_target_ids.update(target_ids)
+            logger.info(
+                "[Elastic EP] Aborting %d logical request(s) affecting "
+                "%d removed child/internal request(s)",
+                len(target_ids),
+                len(incoming_ids),
+            )
+            # Intentionally discard the engine request IDs returned here;
+            # forwarding aborts to surviving engines is a follow-up.
+            self.output_processor.abort_requests(target_ids, internal=True)
+
         try:
-            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+            await self.engine_core.scale_elastic_ep(
+                new_data_parallel_size,
+                on_removed_requests=abort_removed_requests,
+            )
             self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         finally:
             set_scaling_elastic_ep(False)
