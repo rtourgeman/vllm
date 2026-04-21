@@ -268,7 +268,17 @@ class ElasticEPScalingExecutor:
             wrapper.concrete_cudagraph_entries = {}
 
         elif isinstance(self.worker.model_runner.model, UBatchWrapper):
-            raise RuntimeError("DBO is not yet supported in elastic EP")
+            wrapper = self.worker.model_runner.model
+            all2all_backend = self.worker.vllm_config.parallel_config.all2all_backend
+            if all2all_backend != "nixl_ep":
+                raise RuntimeError(
+                    "DBO is not yet supported in elastic EP for "
+                    f"{all2all_backend} all2all backend"
+                )
+            # NIXL EP uses RDMA instead of SM-partitioned comm kernels, so
+            # clearing the ubatch graph cache and recapturing after the group
+            # swap is sufficient for elastic EP transitions.
+            wrapper.clear_graphs()
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
