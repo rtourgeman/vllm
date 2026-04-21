@@ -34,10 +34,12 @@ from vllm.utils.network_utils import (
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
+    FinishReason,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -1479,6 +1481,35 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     ) -> None:
         await self._send_input(EngineCoreRequestType.ABORT, request_ids, engine)
 
+    def _abort_requests_on_removed_engines(self, new_data_parallel_size: int) -> None:
+        removed_engines = set(self.core_engines[new_data_parallel_size:])
+
+        removed_req_ids = [
+            req_id
+            for req_id, engine in self.reqs_in_flight.items()
+            if engine in removed_engines
+        ]
+        if not removed_req_ids:
+            return
+
+        for req_id in removed_req_ids:
+            self.reqs_in_flight.pop(req_id, None)
+
+        assert self.outputs_queue is not None
+        self.outputs_queue.put_nowait(
+            EngineCoreOutputs(
+                finished_requests=set(removed_req_ids),
+                outputs=[
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=FinishReason.ABORT,
+                    )
+                    for req_id in removed_req_ids
+                ],
+            )
+        )
+
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale elastic EP data parallel size"""
         cur_data_parallel_size = len(self.core_engines)
@@ -1651,6 +1682,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
         assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
         self.resources.engine_manager.remove_run_refs_for_scale_down(removed_dp_size)
+
+        # Requests already routed to engines being removed cannot complete
+        # once those engines shut down, so emit terminal abort outputs now.
+        self._abort_requests_on_removed_engines(new_data_parallel_size)
+
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
             reconfig_request = ReconfigureDistributedRequest(
