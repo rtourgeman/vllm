@@ -366,14 +366,16 @@ class ElasticEPScalingExecutor:
             for module in self.worker.model_runner.model.modules()
             if is_moe_layer(module)
         ]
-        num_local_experts = moe_modules[0].moe_config.num_local_experts
-        assert all(
-            module.moe_config.num_local_experts == num_local_experts
-            for module in moe_modules
-        ), "All MoE modules must have the same number of experts"
+        model = self.worker.model_runner.get_model()
+        if hasattr(model, 'expert_weights') and len(model.expert_weights) > 0:
+            num_local_experts = model.expert_weights[0][0].size(0)
+        else:
+            num_local_experts = moe_modules[0].moe_config.num_local_experts
+
         dp_group = get_dp_group()
         ep_group = get_ep_group()
         for module in moe_modules:
+            module.moe_config.num_local_experts = num_local_experts
             new_moe_config = self._make_eep_moe_config(module, dp_group, ep_group)
             module.moe_config.num_experts = new_moe_config.num_experts
             module.global_num_experts = module.moe_config.num_experts
