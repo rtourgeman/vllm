@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import os
 from collections import defaultdict
 from collections.abc import Callable
@@ -112,13 +113,17 @@ class RayDistributedExecutor(Executor):
                 "from logging.cc regarding SIGTERM received, please ignore "
                 "because this is the expected termination process in Ray."
             )
+        import ray
+
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
-            import ray
-
-            for worker in self.workers:
-                ray.kill(worker)
             self.forward_dag = None
+
+        if hasattr(self, "workers"):
+            for worker in self.workers:
+                with contextlib.suppress(Exception):
+                    ray.kill(worker, no_restart=True)
+            self.workers = []
 
     def _configure_ray_workers_use_nsight(self, ray_remote_kwargs) -> dict[str, Any]:
         # If nsight profiling is enabled, we need to set the profiling
