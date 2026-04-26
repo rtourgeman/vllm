@@ -317,8 +317,22 @@ class ElasticEPScalingState:
             self.model_executor.collective_rpc(
                 "elastic_ep_execute", args=("receive_weights",)
             )
-            self.engine_core.available_gpu_memory_for_kv_cache = (
-                ParallelConfig.sync_kv_cache_memory_size(self.new_dp_group, -1)
+            headrooms = self.model_executor.collective_rpc(
+                "elastic_ep_execute", args=("get_scale_up_kv_cache_headroom",)
+            )
+            kv_cache_memory = ParallelConfig.sync_kv_cache_memory_size(
+                self.new_dp_group, -1
+            )
+            headroom = max(headrooms) if headrooms else 0
+            self.engine_core.available_gpu_memory_for_kv_cache = max(
+                0, kv_cache_memory - headroom
+            )
+            logger.info(
+                "[Elastic EP] New worker reserved %.2f GiB KV-cache headroom "
+                "(synced=%.2f GiB, adjusted=%.2f GiB)",
+                headroom / (1 << 30),
+                kv_cache_memory / (1 << 30),
+                self.engine_core.available_gpu_memory_for_kv_cache / (1 << 30),
             )
             self.model_executor.collective_rpc(
                 "elastic_ep_execute", args=("prepare_new_worker",)

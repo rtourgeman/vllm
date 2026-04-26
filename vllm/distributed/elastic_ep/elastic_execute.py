@@ -612,6 +612,18 @@ class ElasticEPScalingExecutor:
         torch.accelerator.synchronize()
         self._log_memory("after receive_weights")
 
+    def get_scale_up_kv_cache_headroom(self) -> int:
+        if not torch.cuda.is_available():
+            return 0
+        _, total = torch.cuda.mem_get_info(torch.cuda.current_device())
+        min_headroom = 4 * (1 << 30)
+        max_headroom = 8 * (1 << 30)
+        headroom = min(max(int(total * 0.10), min_headroom), max_headroom)
+        self._log_memory(
+            f"scale-up KV cache headroom candidate={_format_gib(headroom)}"
+        )
+        return headroom
+
     def receive_expert_mapping(self) -> tuple[torch.Tensor, int, int]:
         dp_group = get_dp_group()
         assert isinstance(dp_group, StatelessGroupCoordinator)
