@@ -40,7 +40,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
-from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
+from vllm.v1.worker.workspace import lock_workspace, release_workspace, unlock_workspace
 
 logger = init_logger(__name__)
 
@@ -265,7 +265,7 @@ class ElasticEPScalingExecutor:
     def _release_cuda_graphs(self) -> None:
         if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
             wrapper = self.worker.model_runner.model
-            wrapper.concrete_cudagraph_entries = {}
+            wrapper.clear_graphs()
 
         elif isinstance(self.worker.model_runner.model, UBatchWrapper):
             wrapper = self.worker.model_runner.model
@@ -280,10 +280,12 @@ class ElasticEPScalingExecutor:
             # swap is sufficient for elastic EP transitions.
             wrapper.clear_graphs()
 
+        CUDAGraphWrapper.clear_all_graphs()
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
             reset_compile_wrapper(self.worker.model_runner.get_model())
 
+        release_workspace()
         gc.collect()
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()

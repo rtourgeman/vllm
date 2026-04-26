@@ -85,6 +85,13 @@ class WorkspaceManager:
                 ],
             )
 
+    def release(self) -> None:
+        """Release all workspace buffers while preserving manager state."""
+        for ubatch_id in range(self._num_ubatches):
+            self._current_workspaces[ubatch_id] = None
+        if envs.VLLM_DEBUG_WORKSPACE:
+            logger.info("[WORKSPACE DEBUG] Workspace buffers released.")
+
     def is_locked(self) -> bool:
         """Check if workspace is locked."""
         return self._locked
@@ -270,6 +277,11 @@ def unlock_workspace() -> None:
     called again to prevent unexpected allocations.
     """
     current_workspace_manager().unlock()
+
+
+def release_workspace() -> None:
+    """Release allocated workspace buffers without resetting the manager."""
+    current_workspace_manager().release()
 
 
 def reset_workspace_manager() -> None:
