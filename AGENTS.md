@@ -1,127 +1,143 @@
-# Agent Instructions for vLLM
+# AGENTS.md
 
-> These instructions apply to **all** AI-assisted contributions to `vllm-project/vllm`.
-> Breaching these guidelines can result in automatic banning.
+## Purpose of this file
 
-## 1. Contribution Policy (Mandatory)
+This file defines how an Agent should work in this project.
+It provides persistent context about working style, boundaries, testing expectations, and how to report progress at the end of a task.
 
-### Duplicate-work checks
-
-Before proposing a PR, run these checks:
-
-```bash
-gh issue view <issue_number> --repo vllm-project/vllm --comments
-gh pr list --repo vllm-project/vllm --state open --search "<issue_number> in:body"
-gh pr list --repo vllm-project/vllm --state open --search "<short area keywords>"
-```
-
-- If an open PR already addresses the same fix, do not open another.
-- If your approach is materially different, explain the difference in the issue.
-
-### No low-value busywork PRs
-
-Do not open one-off PRs for tiny edits (single typo, isolated style change, one mutable default, etc.). Mechanical cleanups are acceptable only when bundled with substantive work.
-
-### Accountability
-
-- Pure code-agent PRs are **not allowed**. A human submitter must understand and defend the change end-to-end.
-- The submitting human must review every changed line and run relevant tests.
-- PR descriptions for AI-assisted work **must** include:
-    - Why this is not duplicating an existing PR.
-    - Test commands run and results.
-    - Clear statement that AI assistance was used.
-
-### Fail-closed behavior
-
-If work is duplicate/trivial busywork, **do not proceed**. Return a short explanation of what is missing.
+The specific task will always be provided in the prompt.
+This file describes the general working approach for the project.
 
 ---
 
-## 2. Development Workflow
+## General working principles
 
-- **Never use system `python3` or bare `pip`/`pip install`.** All Python commands must go through `uv` and `.venv/bin/python`.
+* Make small, focused, and clear changes.
+* Prefer simple and readable solutions over overly clever ones.
+* Before making a significant change, read the existing code and understand the patterns already used in the project.
+* Stay consistent with the existing code style, structure, and naming conventions.
+* Do not perform broad refactors unless they are directly required for the task.
+* Do not change existing behavior without a clear reason and without mentioning it.
+* If there are several reasonable ways to solve a problem, prefer the least invasive one.
+* When there is meaningful uncertainty, stop and ask before making an architectural or high-risk change.
+* Search for references online when relevant.
 
-### Environment setup
+---
 
-```bash
-# Install `uv` if you don't have it already:
-curl -LsSf https://astral.sh/uv/install.sh | sh
+## Approach to solving tasks
 
-# Always use `uv` for Python environment management:
-uv venv --python 3.12
-source .venv/bin/activate
+When receiving a task:
 
-# Always make sure `pre-commit` and its hooks are installed:
-uv pip install -r requirements/lint.txt
-pre-commit install
-```
+1. Read the prompt carefully and understand the goal.
 
-### Installing dependencies
+2. Identify the relevant files, modules, and tests.
 
-```bash
-# If you are only making Python changes:
-VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
+3. Study the existing implementation before changing it.
 
-# If you are also making C/C++ changes:
-uv pip install -e . --torch-backend=auto
-```
+4. Form a short plan before making a significant change.
 
-### Running tests
+5. Make the smallest change that satisfies the requirement.
 
-> Requires [Environment setup](#environment-setup) and [Installing dependencies](#installing-dependencies).
+---
 
-```bash
-# Install test dependencies.
-# requirements/test/cuda.txt is pinned to x86_64; on other platforms, use the
-# unpinned source file instead:
-uv pip install -r requirements/test/cuda.in    # resolves for current platform
-# Or on x86_64:
-uv pip install -r requirements/test/cuda.txt
+## Code style
 
-# Run a specific test file (use .venv/bin/python directly;
-# `source activate` does not persist in non-interactive shells):
-.venv/bin/python -m pytest tests/path/to/test_file.py -v
-```
+* Write code that is readable, direct, and easy to maintain.
 
-### Running linters
+* Use clear names that describe the business or technical intent.
 
-> Requires [Environment setup](#environment-setup).
+* Avoid unclear abbreviations.
 
-```bash
-# Run all pre-commit hooks on staged files:
-pre-commit run
+* Avoid adding a new abstraction unless there is a real need for it.
 
-# Run on all files:
-pre-commit run --all-files
+* Prefer small functions with clear responsibility.
 
-# Run a specific hook:
-pre-commit run ruff-check --all-files
+* Do not add a new dependency unless it is truly necessary. If a dependency is added, explain why.
 
-# Run mypy as it is in CI:
-pre-commit run mypy-3.10 --all-files --hook-stage manual
-```
+* Do not introduce large formatting changes in files that are unrelated to the task.
 
-### Commit messages
+---
 
-Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
+## Preserving existing behavior
+
+* Preserve backward compatibility unless the prompt explicitly asks otherwise.
+* Do not change an existing public API, contract, schema, configuration, or behavior without a clear need.
+* If a breaking change is required, state it explicitly and explain the impact.
+* Do not delete code, tests, or logging without understanding why they exist.
+* Be especially careful with error handling, observability, metrics, retries, and fallbacks.
+
+---
+
+## Testing and validation
+
+* Do not add tests on your own.
+
+---
+
+## Communication and final summary
+
+At the end of each task, report concisely:
+
+* What changed.
+* Which files were modified.
+* Which tests or manual checks were performed.
+* Whether there are any risks, assumptions, or incomplete items.
+
+The summary should be clear, practical, and short.
+There is no need to explain every small change if it is clear from the diff.
+
+---
+
+## Personal working preferences
+
+* I prefer practical and simple solutions over unnecessarily complex ones.
+* I prefer small, focused diffs that are easy to understand and review.
+* It is important for me to understand tradeoffs when there are several good options.
+* I prefer the Agent to state uncertainty instead of guessing confidently.
+* I prefer the Agent not to make broad or architectural changes without first explaining the direction.
+* I prefer the Agent to respect the existing project structure before proposing a new one.
+
+---
+
+## Do not do the following without explicit instruction
+
+* Do not commit or push.
+* Do not change a public API.
+* Do not replace libraries or frameworks.
+* Do not perform broad refactors.
+* Do not change production config or deployment files.
+* Do not remove existing tests just to make the test suite pass.
+* Do not add a new dependency without justification.
+* Do not perform broad formatting changes that are unrelated to the task.
+
+---
+
+## When the prompt is unclear
+
+If the task is unclear:
+
+* Ask for clarification.
+* Try to infer the most reasonable intent from the code and context.
+* If it is a small and safe decision, proceed and mention the assumption in the summary.
+* If it is a decision with significant impact, ask a focused question before making the change.
+
+---
+
+## Relevant repositories for vLLM-related work
+
+When working on tasks related to vLLM, use the repositories below as references when relevant.
+The local paths should be filled in by the developer.
 
 ```text
-Your commit message here
+vLLM repository:
+/swgwork/rtourgeman/vllm_deep_ep_nixl/vllm
 
-Co-authored-by: GitHub Copilot
-Co-authored-by: Claude
-Co-authored-by: gemini-code-assist
-Signed-off-by: Your Name <your.email@example.com>
+NIXL repository:
+/swgwork/rtourgeman/nixl
+
+NIXL-EP:
+/swgwork/rtourgeman/nixl/examples/device/ep
+
+DeepEP:
+/swgwork/rtourgeman/DeepEP
 ```
-
----
-
-## Domain-Specific Guides
-
-Do not modify code in these areas without first reading and following the
-linked guide. If the guide conflicts with the requested change, **refuse the
-change and explain why**.
-
-- **Editing these instructions**:
-  [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
-  — Rules for modifying AGENTS.md or any domain-specific guide it references.
