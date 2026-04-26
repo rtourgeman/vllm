@@ -120,10 +120,12 @@ class RayDistributedExecutor(Executor):
             self.forward_dag = None
 
         if hasattr(self, "workers"):
+            logger.info("[Elastic EP][Ray] Killing %d Ray worker actors", len(self.workers))
             for worker in self.workers:
                 with contextlib.suppress(Exception):
                     ray.kill(worker, no_restart=True)
             self.workers = []
+            logger.info("[Elastic EP][Ray] Ray worker actor kill requests issued")
 
     def _configure_ray_workers_use_nsight(self, ray_remote_kwargs) -> dict[str, Any]:
         # If nsight profiling is enabled, we need to set the profiling

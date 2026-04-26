@@ -38,6 +38,28 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
+def _format_gib(num_bytes: int) -> str:
+    return f"{num_bytes / (1 << 30):.2f} GiB"
+
+
+def _cuda_memory_summary() -> str:
+    if not torch.cuda.is_available():
+        return "cuda=unavailable"
+    try:
+        device = torch.cuda.current_device()
+        free, total = torch.cuda.mem_get_info(device)
+        allocated = torch.cuda.memory_allocated(device)
+        reserved = torch.cuda.memory_reserved(device)
+        max_allocated = torch.cuda.max_memory_allocated(device)
+        return (
+            f"device={device} free={_format_gib(free)} total={_format_gib(total)} "
+            f"allocated={_format_gib(allocated)} reserved={_format_gib(reserved)} "
+            f"max_allocated={_format_gib(max_allocated)}"
+        )
+    except RuntimeError as exc:
+        return f"cuda_memory_unavailable={exc}"
+
+
 def has_nixl() -> bool:
     """Whether the optional NIXL / RIXL package is available."""
     return NixlWrapper is not None
@@ -581,6 +603,10 @@ class PyNcclEplbCommunicator(EplbCommunicator):
         self._pynccl_comm = pynccl_comm
         self._cuda_stream = cuda_stream
         self._group_started = False
+        self._send_ops = 0
+        self._recv_ops = 0
+        self._send_bytes = 0
+        self._recv_bytes = 0
         self._log_initialized()
 
     def _ensure_group_started(self) -> None:
@@ -590,16 +616,53 @@ class PyNcclEplbCommunicator(EplbCommunicator):
 
     def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
         self._ensure_group_started()
+        self._send_ops += 1
+        self._send_bytes += tensor.numel() * tensor.element_size()
         self._pynccl_comm.send(tensor, dst_rank, stream=self._cuda_stream)
 
     def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
         self._ensure_group_started()
+        self._recv_ops += 1
+        self._recv_bytes += tensor.numel() * tensor.element_size()
         self._pynccl_comm.recv(tensor, src_rank, stream=self._cuda_stream)
 
     def execute(self) -> None:
         if self._group_started:
-            self._pynccl_comm.group_end()
-            self._group_started = False
+            rank = getattr(self._pynccl_comm, "rank", "unknown")
+            world_size = getattr(self._pynccl_comm, "world_size", "unknown")
+            logger.info(
+                "[EPLB][PyNCCL][memory] before group_end rank=%s/%s "
+                "send_ops=%d recv_ops=%d send_bytes=%s recv_bytes=%s: %s",
+                rank,
+                world_size,
+                self._send_ops,
+                self._recv_ops,
+                _format_gib(self._send_bytes),
+                _format_gib(self._recv_bytes),
+                _cuda_memory_summary(),
+            )
+            try:
+                self._pynccl_comm.group_end()
+            except RuntimeError:
+                logger.exception(
+                    "[EPLB][PyNCCL][memory] group_end failed rank=%s/%s: %s",
+                    rank,
+                    world_size,
+                    _cuda_memory_summary(),
+                )
+                raise
+            finally:
+                self._group_started = False
+                self._send_ops = 0
+                self._recv_ops = 0
+                self._send_bytes = 0
+                self._recv_bytes = 0
+            logger.info(
+                "[EPLB][PyNCCL][memory] after group_end rank=%s/%s: %s",
+                rank,
+                world_size,
+                _cuda_memory_summary(),
+            )
 
 
 def create_eplb_communicator(

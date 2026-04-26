@@ -87,10 +87,21 @@ class WorkspaceManager:
 
     def release(self) -> None:
         """Release all workspace buffers while preserving manager state."""
+        sizes_mb = [
+            self._workspace_size_bytes(ws) / _MB
+            for ws in self._current_workspaces
+            if ws is not None
+        ]
+        logger.info(
+            "[WORKSPACE DEBUG] Releasing workspace buffers: sizes_mb=%s "
+            "num_ubatches=%d locked=%s",
+            sizes_mb,
+            self._num_ubatches,
+            self._locked,
+        )
         for ubatch_id in range(self._num_ubatches):
             self._current_workspaces[ubatch_id] = None
-        if envs.VLLM_DEBUG_WORKSPACE:
-            logger.info("[WORKSPACE DEBUG] Workspace buffers released.")
+        logger.info("[WORKSPACE DEBUG] Workspace buffers released.")
 
     def is_locked(self) -> bool:
         """Check if workspace is locked."""
@@ -185,6 +196,15 @@ class WorkspaceManager:
                         (required_bytes,), dtype=torch.uint8, device=self._device
                     )
 
+            logger.info(
+                "[WORKSPACE DEBUG] Resized workspace from '%s': %.2f MB -> "
+                "%.2f MB (%d ubatches, total memory %.2f MB)",
+                get_caller_info(),
+                current_size / _MB,
+                required_bytes / _MB,
+                self._num_ubatches,
+                required_bytes * self._num_ubatches / _MB,
+            )
             if envs.VLLM_DEBUG_WORKSPACE:
                 logger.info(
                     "[WORKSPACE DEBUG] Resized workspace from '%s': %.2f MB -> "

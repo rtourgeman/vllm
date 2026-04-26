@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import contextlib
 import gc
 import weakref
 from collections.abc import Iterable, Sequence
@@ -43,6 +44,28 @@ from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, release_workspace, unlock_workspace
 
 logger = init_logger(__name__)
+
+
+def _format_gib(num_bytes: int) -> str:
+    return f"{num_bytes / (1 << 30):.2f} GiB"
+
+
+def _cuda_memory_summary() -> str:
+    if not torch.cuda.is_available():
+        return "cuda=unavailable"
+    try:
+        device = torch.cuda.current_device()
+        free, total = torch.cuda.mem_get_info(device)
+        allocated = torch.cuda.memory_allocated(device)
+        reserved = torch.cuda.memory_reserved(device)
+        max_allocated = torch.cuda.max_memory_allocated(device)
+        return (
+            f"device={device} free={_format_gib(free)} total={_format_gib(total)} "
+            f"allocated={_format_gib(allocated)} reserved={_format_gib(reserved)} "
+            f"max_allocated={_format_gib(max_allocated)}"
+        )
+    except RuntimeError as exc:
+        return f"cuda_memory_unavailable={exc}"
 
 
 def batch_transfer_weights(
@@ -146,6 +169,22 @@ class ElasticEPScalingExecutor:
         if method is None:
             raise ValueError(f"Unknown execute method: {execute_method}")
         return method(*args, **kwargs)
+
+    def _log_memory(self, label: str) -> None:
+        parallel_config = self.worker.vllm_config.parallel_config
+        rank_parts = [
+            f"dp_rank={parallel_config.data_parallel_rank}",
+            f"dp_size={parallel_config.data_parallel_size}",
+        ]
+        with contextlib.suppress(Exception):
+            rank_parts.append(f"ep_rank={get_ep_group().rank}")
+            rank_parts.append(f"ep_size={get_ep_group().world_size}")
+        logger.info(
+            "[Elastic EP][memory] %s (%s): %s",
+            label,
+            ", ".join(rank_parts),
+            _cuda_memory_summary(),
+        )
 
     def _set_eplb_suppressed(self, suppressed: bool) -> None:
         self.worker.model_runner.eep_eplb_suppressed = suppressed
@@ -263,6 +302,7 @@ class ElasticEPScalingExecutor:
         )
 
     def _release_cuda_graphs(self) -> None:
+        self._log_memory("before graph/workspace release")
         if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
             wrapper = self.worker.model_runner.model
             wrapper.clear_graphs()
@@ -280,26 +320,36 @@ class ElasticEPScalingExecutor:
             # swap is sufficient for elastic EP transitions.
             wrapper.clear_graphs()
 
+        self._log_memory("after wrapper graph clear")
         CUDAGraphWrapper.clear_all_graphs()
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
             reset_compile_wrapper(self.worker.model_runner.get_model())
 
+        self._log_memory("before workspace release")
         release_workspace()
+        self._log_memory("after workspace release before gc")
         gc.collect()
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
+        self._log_memory("after graph/workspace release and empty_cache")
 
     def switch_and_remove(self) -> None:
+        self._log_memory("switch_and_remove start")
         self._release_cuda_graphs()
+        self._log_memory("before removing active groups")
         _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
+        self._log_memory("switch_and_remove complete")
 
     def switch_and_prepare(self) -> None:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
+        self._log_memory("switch_and_prepare start")
         self._release_cuda_graphs()
+        self._log_memory("before active group replacement")
         _replace_active_groups(**pop_standby_groups())
+        self._log_memory("after active group replacement")
 
         parallel_config = self.worker.vllm_config.parallel_config
         reconfig_request = self.reconfig_request
@@ -428,13 +478,17 @@ class ElasticEPScalingExecutor:
                     "reinitialize_moe_kernel_for_elastic_ep",
                 ):
                     module.quant_method.reinitialize_moe_kernel_for_elastic_ep(module)
+            self._log_memory("before prepare_communication_buffer_for_model")
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
+            self._log_memory("after prepare_communication_buffer_for_model")
 
+        self._log_memory("before create_eplb_communicator")
         eplb_model_state.communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=parallel_config.eplb_config.communicator,
             expert_weights=model.expert_weights[0],
         )
+        self._log_memory("after create_eplb_communicator")
 
         if (
             self.worker.vllm_config.compilation_config.mode
@@ -460,7 +514,9 @@ class ElasticEPScalingExecutor:
         multi_block_table.clear()
 
         unlock_workspace()
+        self._log_memory("before compile_or_warm_up_model")
         self.worker.compile_or_warm_up_model()
+        self._log_memory("after compile_or_warm_up_model")
         lock_workspace()
 
         for bt, (saved_gpu, saved_cpu) in zip(
@@ -476,6 +532,7 @@ class ElasticEPScalingExecutor:
     ) -> None:
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding...")
+        self._log_memory("before eplb reshuffle")
 
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
@@ -488,8 +545,10 @@ class ElasticEPScalingExecutor:
             eplb_state.rearrange()
         else:
             eplb_state.rearrange(rank_mapping=rank_mapping)
+        self._log_memory("after eplb rearrange before synchronize")
         # NOTE(yongji): check whether we need to synchronize here
         torch.accelerator.synchronize()
+        self._log_memory("after eplb reshuffle synchronize")
         # reset expert_rearrangement_step to ensure all ranks are synchronized
         eplb_state.expert_rearrangement_step = 0
         eplb_state.num_valid_physical_experts = (
@@ -516,6 +575,7 @@ class ElasticEPScalingExecutor:
         self._perform_eplb_reshuffle(rank_mapping=rank_mapping)
 
     def receive_weights(self) -> None:
+        self._log_memory("before receive_weights")
         dp_group = get_dp_group()
         assert isinstance(dp_group, StatelessGroupCoordinator)
         new_dp_size = dp_group.world_size
@@ -550,6 +610,7 @@ class ElasticEPScalingExecutor:
             expert_weights=model.expert_weights,
         )
         torch.accelerator.synchronize()
+        self._log_memory("after receive_weights")
 
     def receive_expert_mapping(self) -> tuple[torch.Tensor, int, int]:
         dp_group = get_dp_group()
@@ -583,6 +644,7 @@ class ElasticEPScalingExecutor:
         )
 
     def prepare_new_worker(self) -> None:
+        self._log_memory("prepare_new_worker start")
         model = self.worker.model_runner.get_model()
         for module in model.modules():
             if (
@@ -595,4 +657,6 @@ class ElasticEPScalingExecutor:
                 module.quant_method.reinitialize_moe_kernel_for_elastic_ep(module)
 
         with set_current_vllm_config(self.worker.vllm_config):
+            self._log_memory("new worker before prepare_communication_buffer_for_model")
             prepare_communication_buffer_for_model(model)
+            self._log_memory("new worker after prepare_communication_buffer_for_model")
