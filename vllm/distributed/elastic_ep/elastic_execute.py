@@ -23,6 +23,11 @@ from vllm.distributed import (
     get_pcp_group,
     get_tp_group,
 )
+from vllm.distributed.elastic_ep import (
+    kv_mem_trace,
+    kv_mem_trace_reset,
+    kv_mem_used_free_mib_local,
+)
 from vllm.distributed.elastic_ep.standby_state import (
     create_standby_groups,
     get_standby_dp_group,
@@ -133,6 +138,8 @@ class ElasticEPScalingExecutor:
     def __init__(self, worker):
         self.worker_ref = weakref.ref(worker)
         self.reconfig_request = None
+        self._kv_mem_role: str = "existing"
+        self._kv_mem_budget_bytes: int | None = None
 
     @property
     def worker(self):
@@ -147,6 +154,30 @@ class ElasticEPScalingExecutor:
             raise ValueError(f"Unknown execute method: {execute_method}")
         return method(*args, **kwargs)
 
+    def _trace(self, ckpt: str, **extra) -> None:
+        pc = self.worker.vllm_config.parallel_config
+        try:
+            ep_size = get_ep_group().world_size
+        except (AssertionError, AttributeError):
+            ep_size = pc.data_parallel_size * pc.tensor_parallel_size
+        budget = self._kv_mem_budget_bytes
+        kv_mem_trace(
+            ckpt,
+            rank=pc.data_parallel_rank,
+            role=self._kv_mem_role,
+            ep=ep_size,
+            dbo="on" if pc.enable_dbo else "off",
+            kv_budget=f"{budget / (1 << 30):.2f}GiB" if budget else None,
+            **extra,
+        )
+
+    def gpu_used_free_mib(self) -> tuple[int, int]:
+        return kv_mem_used_free_mib_local()
+
+    def trace_inherited_kv_budget(self, kv_budget_bytes: int) -> None:
+        self._kv_mem_budget_bytes = int(kv_budget_bytes)
+        self._trace("after_inherit_kv_budget")
+
     def _set_eplb_suppressed(self, suppressed: bool) -> None:
         self.worker.model_runner.eep_eplb_suppressed = suppressed
         ep_group = get_standby_ep_group() or get_ep_group()
@@ -157,6 +188,12 @@ class ElasticEPScalingExecutor:
             )
 
     def load_model(self) -> None:
+        self._kv_mem_role = "new"
+        kv_mem_trace_reset(
+            self._kv_mem_role,
+            self.worker.vllm_config.parallel_config.data_parallel_rank,
+        )
+        self._trace("worker_start")
         (
             expanded_physical_to_logical,
             num_logical_experts,
@@ -175,6 +212,12 @@ class ElasticEPScalingExecutor:
     def create_standby_groups(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
+        self._kv_mem_role = "existing"
+        kv_mem_trace_reset(
+            self._kv_mem_role,
+            self.worker.vllm_config.parallel_config.data_parallel_rank,
+        )
+        self._trace("worker_start")
         self.reconfig_request = reconfig_request
         new_dp_size = reconfig_request.new_data_parallel_size
         old_dp_size = get_dp_group().world_size
@@ -423,6 +466,7 @@ class ElasticEPScalingExecutor:
             backend=parallel_config.eplb_config.communicator,
             expert_weights=model.expert_weights[0],
         )
+        self._trace("after_nccl_eplb_setup")
 
         if (
             self.worker.vllm_config.compilation_config.mode
@@ -450,6 +494,7 @@ class ElasticEPScalingExecutor:
         unlock_workspace()
         self.worker.compile_or_warm_up_model()
         lock_workspace()
+        self._trace("after_dbo_alloc")
 
         for bt, (saved_gpu, saved_cpu) in zip(
             multi_block_table.block_tables, saved_block_tables
@@ -486,6 +531,7 @@ class ElasticEPScalingExecutor:
         eplb_state.is_async = is_async_enabled
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
+        self._trace("ready")
 
     def perform_eplb_reshuffle(self) -> None:
         self._perform_eplb_reshuffle()
@@ -570,7 +616,10 @@ class ElasticEPScalingExecutor:
             old_num_physical_experts,
         )
 
-    def prepare_new_worker(self) -> None:
+    def prepare_new_worker(self, kv_budget_bytes: int | None = None) -> None:
+        if kv_budget_bytes is not None:
+            self._kv_mem_budget_bytes = kv_budget_bytes
+        self._trace("after_inherit_kv_budget")
         model = self.worker.model_runner.get_model()
         for module in model.modules():
             if (

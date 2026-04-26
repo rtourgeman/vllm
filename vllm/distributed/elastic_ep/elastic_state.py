@@ -8,11 +8,14 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch.distributed
 
+import torch
+
 from vllm.config import ParallelConfig
 from vllm.distributed import (
     sched_yield,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.elastic_ep import kv_mem_trace_enabled, kv_mem_trace_summary
 from vllm.logger import init_logger
 from vllm.v1.engine import (
     EEPNotificationType,
@@ -300,6 +303,7 @@ class ElasticEPScalingState:
             self._eplb_reshuffle()
             self.state = ScaleUpExistingEngineState.COMPLETE
             self._update_parallel_config()
+            self._maybe_emit_kv_mem_summary()
             return True
 
         else:
@@ -325,7 +329,11 @@ class ElasticEPScalingState:
                 self.engine_core.available_gpu_memory_for_kv_cache / (1 << 30),
             )
             self.model_executor.collective_rpc(
-                "elastic_ep_execute", args=("prepare_new_worker",)
+                "elastic_ep_execute",
+                args=(
+                    "prepare_new_worker",
+                    int(self.engine_core.available_gpu_memory_for_kv_cache),
+                ),
             )
             self.state = ScaleUpNewEngineState.PREPARE
             return True
@@ -358,6 +366,7 @@ class ElasticEPScalingState:
             assert self.new_dp_group.rank() > 0
             self._eplb_reshuffle()
             self.state = ScaleUpNewEngineState.COMPLETE
+            self._maybe_emit_kv_mem_summary()
             return True
 
         else:
@@ -496,6 +505,24 @@ class ElasticEPScalingState:
         if self.old_dp_group.rank() == 0:
             logger.info("[Elastic EP] Broadcasted expert mapping to new workers")
 
+    def _maybe_emit_kv_mem_summary(self) -> None:
+        if not kv_mem_trace_enabled() or self.new_dp_group is None:
+            return
+        used, free = self.model_executor.collective_rpc(
+            "elastic_ep_execute", args=("gpu_used_free_mib",)
+        )[0]
+        t = torch.tensor([used, free], dtype=torch.int64, device="cpu")
+        out = [torch.zeros_like(t) for _ in range(self.new_dp_group.size())]
+        torch.distributed.all_gather(out, t, group=self.new_dp_group)
+        # Only rank 0 of new_dp_group prints; that's always an existing engine
+        # so old_dp_group is set there.
+        if self.new_dp_group.rank() == 0 and self.old_dp_group is not None:
+            kv_mem_trace_summary(
+                f"{self.old_dp_group.size()}->{self.new_dp_group.size()}",
+                [int(x[0]) for x in out],
+                [int(x[1]) for x in out],
+            )
+
     def _sync_kv_cache_memory_size(self):
         assert self.engine_core.available_gpu_memory_for_kv_cache > 0
         assert self.new_dp_group is not None and self.old_dp_group is not None
@@ -508,6 +535,13 @@ class ElasticEPScalingState:
                 "[Elastic EP] Existing rank contributed KV-cache budget=%.2f GiB",
                 self.engine_core.available_gpu_memory_for_kv_cache / (1 << 30),
             )
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute",
+            args=(
+                "trace_inherited_kv_budget",
+                int(self.engine_core.available_gpu_memory_for_kv_cache),
+            ),
+        )
 
     def _switch_and_prepare(self):
         self.model_executor.collective_rpc(

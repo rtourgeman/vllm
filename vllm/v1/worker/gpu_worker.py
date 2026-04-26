@@ -518,6 +518,11 @@ class Worker(WorkerBase):
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        from vllm.distributed.elastic_ep import kv_mem_trace
+
+        rank = self.vllm_config.parallel_config.data_parallel_rank
+        role = getattr(self.elastic_ep_executor, "_kv_mem_role", "existing")
+        kv_mem_trace("before_kv_cache_alloc", rank=rank, role=role)
 
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
@@ -549,6 +554,8 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+
+        kv_mem_trace("after_kv_cache_alloc", rank=rank, role=role)
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
@@ -692,6 +699,14 @@ class Worker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+        from vllm.distributed.elastic_ep import kv_mem_trace
+
+        kv_mem_trace(
+            "after_graph_capture",
+            rank=self.vllm_config.parallel_config.data_parallel_rank,
+            role=getattr(self.elastic_ep_executor, "_kv_mem_role", "existing"),
+        )
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
