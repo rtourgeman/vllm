@@ -320,6 +320,10 @@ class ElasticEPScalingState:
             self.engine_core.available_gpu_memory_for_kv_cache = (
                 ParallelConfig.sync_kv_cache_memory_size(self.new_dp_group, -1)
             )
+            logger.info(
+                "[Elastic EP] New worker inherited KV-cache budget=%.2f GiB",
+                self.engine_core.available_gpu_memory_for_kv_cache / (1 << 30),
+            )
             self.model_executor.collective_rpc(
                 "elastic_ep_execute", args=("prepare_new_worker",)
             )
@@ -500,7 +504,10 @@ class ElasticEPScalingState:
             self.engine_core.available_gpu_memory_for_kv_cache,
         )
         if self.old_dp_group.rank() == 0:
-            logger.info("[Elastic EP] Synced KV cache memory size to new workers")
+            logger.info(
+                "[Elastic EP] Existing rank contributed KV-cache budget=%.2f GiB",
+                self.engine_core.available_gpu_memory_for_kv_cache / (1 << 30),
+            )
 
     def _switch_and_prepare(self):
         self.model_executor.collective_rpc(
