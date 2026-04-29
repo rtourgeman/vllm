@@ -686,7 +686,12 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+ 
+        torch.accelerator.synchronize()
 
+        # Ensure all GPU work (especially EP cooperative kernels from the
+        # post-capture _dummy_run) completes before returning. The next
+        # execute_model call may run on a different thread/stream.
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
