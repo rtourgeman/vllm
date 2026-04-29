@@ -50,6 +50,7 @@ def _build_vllm_serve_args(all2all_backend: str) -> list[str]:
         all2all_backend,
         "--enable-elastic-ep",
         "--enable-eplb",
+        "--enable-dbo",
         "--eplb-config.num_redundant_experts",
         "0",
         "--data-parallel-backend",
