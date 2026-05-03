@@ -104,11 +104,8 @@ if [[ "${RUN_BASELINE_BENCH}" == "auto" ]]; then
     RUN_BASELINE_BENCH="${RUN_ELASTIC_SCALE}"
 fi
 
-(( NODES >= 2 )) || { echo "ERROR: need >= 2 nodes for DeepSeek V3" >&2; exit 1; }
 (( TARGET_DP_SIZE <= TOTAL_GPUS )) || { echo "ERROR: target DP (${TARGET_DP_SIZE}) > allocated GPUs (${TOTAL_GPUS})" >&2; exit 1; }
 (( INITIAL_DP_SIZE <= TARGET_DP_SIZE )) || { echo "ERROR: initial DP > target DP" >&2; exit 1; }
-(( INITIAL_DP_SIZE % GPUS_PER_NODE == 0 && TARGET_DP_SIZE % GPUS_PER_NODE == 0 )) || { echo "ERROR: DP sizes must use full nodes" >&2; exit 1; }
-(( TOTAL_EXPERTS % INITIAL_DP_SIZE == 0 && TOTAL_EXPERTS % TARGET_DP_SIZE == 0 )) || { echo "ERROR: experts (${TOTAL_EXPERTS}) must divide evenly by both DP sizes" >&2; exit 1; }
 
 LOG_DIR="${SCRIPT_DIR}/logs/$(date +%Y-%m-%d)"
 mkdir -p "${LOG_DIR}"

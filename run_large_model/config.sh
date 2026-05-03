@@ -16,7 +16,8 @@ BATCH_PARTITION="${BATCH_PARTITION:-batch}"
 TIME="${TIME:-04:00:00}"
 
 # Model / vLLM
-MODEL_NAME="${MODEL_NAME:-deepseek-ai/DeepSeek-V3}"
+# MODEL_NAME="${MODEL_NAME:-deepseek-ai/DeepSeek-V3}"
+MODEL_NAME="${MODEL_NAME:-deepseek-ai/DeepSeek-V2-Lite-Chat}"
 PORT="${PORT:-8006}"
 HOST="${HOST:-0.0.0.0}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
