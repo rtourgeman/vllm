@@ -89,6 +89,24 @@ HEAD_NODE_IP="$(
         bash -lc "hostname -I | tr ' ' '\n' | grep -v '^169\\.254\\.' | head -1"
 )"
 
+SECONDARY_HEAD=""
+SECONDARY_HEAD_IP=""
+RAY_PORT_B=$((RAY_PORT + 1000))
+DATA_PARALLEL_RPC_PORT_B=$((DATA_PARALLEL_RPC_PORT + 1000))
+PORT_B=$((PORT + 1))
+SECONDARY_DP_SIZE=$((TARGET_DP_SIZE - INITIAL_DP_SIZE))
+SECONDARY_NUM_PROMPTS="${SECONDARY_NUM_PROMPTS:-100}"
+
+if [[ "${RUN_ELASTIC_SCALE}" == "true" ]] && (( TARGET_NODES > INITIAL_NODES )); then
+    SECONDARY_HEAD="${SLURM_NODES[${INITIAL_NODES}]}"
+    SECONDARY_HEAD_IP="$(
+        srun --nodes=1 --ntasks=1 --overlap -w "${SECONDARY_HEAD}" \
+            --container-image="${CONTAINER_IMAGE}" \
+            --container-mounts="${CONTAINER_MOUNTS}" \
+            bash -lc "hostname -I | tr ' ' '\n' | grep -v '^169\\.254\\.' | head -1"
+    )"
+fi
+
 export SCRIPT_DIR VLLM_WORKDIR RUN_DIR HEAD_NODE HEAD_NODE_IP RAY_PORT
 export GPUS_PER_NODE DATA_PARALLEL_SIZE DATA_PARALLEL_SIZE_LOCAL
 export DATA_PARALLEL_ADDRESS="${HEAD_NODE_IP}"
@@ -102,6 +120,8 @@ export NUM_PROMPTS MAX_CONCURRENCY RANDOM_INPUT_LEN RANDOM_OUTPUT_LEN
 export SERVER_WAIT_TIMEOUT RAY_WAIT_TIMEOUT
 export BENCH_HOST="localhost" WAIT_FOR_SERVER="false"
 export ENABLE_ELASTIC_EP ENABLE_EPLB TENSOR_PARALLEL_SIZE
+export SECONDARY_HEAD SECONDARY_HEAD_IP RAY_PORT_B DATA_PARALLEL_RPC_PORT_B
+export PORT_B SECONDARY_DP_SIZE SECONDARY_NUM_PROMPTS
 
 cat <<EOF
 ============================================================
@@ -120,6 +140,9 @@ elastic:           ${RUN_ELASTIC_SCALE}
 dp:                ${INITIAL_DP_SIZE} -> ${TARGET_DP_SIZE}
 experts_per_gpu:   $((TOTAL_EXPERTS / INITIAL_DP_SIZE)) -> $((TOTAL_EXPERTS / TARGET_DP_SIZE))
 benchmark:         ${NUM_PROMPTS} prompts, c=${MAX_CONCURRENCY}, i=${RANDOM_INPUT_LEN}/o=${RANDOM_OUTPUT_LEN}
+secondary_head:    ${SECONDARY_HEAD:-none} (${SECONDARY_HEAD_IP:-n/a})
+secondary_dp:      ${SECONDARY_DP_SIZE}
+secondary_prompts: ${SECONDARY_NUM_PROMPTS}
 ============================================================
 EOF
 
@@ -128,10 +151,22 @@ srun --nodes="${SLURM_JOB_NUM_NODES}" \
     --container-image="${CONTAINER_IMAGE}" \
     --container-mounts="${CONTAINER_MOUNTS}" \
     bash -lc '
-        if [[ "$(hostname -s)" == "${HEAD_NODE}" ]]; then
+        my_host="$(hostname -s)"
+        if [[ "${my_host}" == "${HEAD_NODE}" ]]; then
             bash "${SCRIPT_DIR}/head_node.sh"
+        elif [[ -n "${SECONDARY_HEAD}" && "${my_host}" == "${SECONDARY_HEAD}" ]]; then
+            bash "${SCRIPT_DIR}/secondary_head.sh"
         else
-            bash "${SCRIPT_DIR}/worker_node.sh"
+            read -ra _nodes <<< "${SLURM_NODES_STR}"
+            _idx=-1
+            for _i in "${!_nodes[@]}"; do
+                if [[ "${_nodes[$_i]}" == "${my_host}" ]]; then _idx=$_i; break; fi
+            done
+            if [[ -n "${SECONDARY_HEAD}" ]] && (( _idx >= INITIAL_NODES )); then
+                bash "${SCRIPT_DIR}/secondary_worker.sh"
+            else
+                bash "${SCRIPT_DIR}/worker_node.sh"
+            fi
         fi
     '
 

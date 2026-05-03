@@ -10,7 +10,24 @@ export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 my_node="$(hostname -s)"
 vllm_pid=""
 
+save_ray_logs() {
+    local ray_log_dir
+    ray_log_dir="$(ls -td /data/tmp/ray/session_*/logs 2>/dev/null | head -1)"
+    if [[ -n "${ray_log_dir}" && -d "${ray_log_dir}" ]]; then
+        local dest="${RUN_DIR}/ray_logs"
+        mkdir -p "${dest}"
+        echo "[${my_node}] copying Ray logs from ${ray_log_dir} to ${dest}"
+        cp -r "${ray_log_dir}/"worker-*.err "${dest}/" 2>/dev/null || true
+        cp -r "${ray_log_dir}/"worker-*.out "${dest}/" 2>/dev/null || true
+        cp "${ray_log_dir}/raylet.err" "${dest}/" 2>/dev/null || true
+        cp "${ray_log_dir}/ray_process_exit.log" "${dest}/" 2>/dev/null || true
+        echo "[${my_node}] Ray logs saved. To find the crashing actor:"
+        echo "  grep -l 'Error\\|Exception\\|OOM\\|CUDA\\|NCCL\\|Killed' ${dest}/worker-*.err"
+    fi
+}
+
 cleanup() {
+    save_ray_logs
     if [[ -n "${vllm_pid}" ]] && kill -0 "${vllm_pid}" 2>&1; then
         echo "[${my_node}] stopping vLLM pid=${vllm_pid}"
         kill "${vllm_pid}" 2>&1 || true
@@ -29,7 +46,8 @@ for ((attempt=1; attempt<=5; attempt++)); do
     if ray start --head \
         --port="${RAY_PORT}" \
         --node-ip-address="${HEAD_NODE_IP}" \
-        --num-gpus="${GPUS_PER_NODE}"; then
+        --num-gpus="${GPUS_PER_NODE}" \
+        --metrics-export-port=9090; then
         break
     fi
     echo "[${my_node}] Ray head start attempt ${attempt}/5 failed (port conflict?), retrying"

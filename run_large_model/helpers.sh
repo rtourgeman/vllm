@@ -73,7 +73,7 @@ join_ray_with_retry() {
     for ((attempt=1; attempt<=max_attempts; attempt++)); do
         ray stop -f 2>&1 || true
         sleep 2
-        if ray start --address="${address}" --num-gpus="${gpus}" --block; then
+        if ray start --address="${address}" --num-gpus="${gpus}" --metrics-export-port=9090 --block; then
             return 0
         fi
         echo "  Ray join attempt ${attempt}/${max_attempts} failed, retrying"
