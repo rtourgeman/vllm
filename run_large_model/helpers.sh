@@ -70,8 +70,8 @@ join_ray_with_retry() {
 
     echo "Joining Ray at ${address}"
     sleep 15
-    for attempt in $(seq 1 "${max_attempts}"); do
-        ray stop -f >/dev/null 2>&1 || true
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        ray stop -f 2>&1 || true
         sleep 2
         if ray start --address="${address}" --num-gpus="${gpus}" --block; then
             return 0

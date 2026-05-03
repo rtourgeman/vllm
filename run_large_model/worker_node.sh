@@ -8,10 +8,10 @@ export VLLM_HOST_IP="$(get_routable_ip)"
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 
 my_node="$(hostname -s)"
-trap "ray stop -f >/dev/null 2>&1 || true" EXIT
+trap "ray stop -f 2>&1 || true" EXIT
 
 cd "${VLLM_WORKDIR}"
-ray stop -f >/dev/null 2>&1 || true
+ray stop -f 2>&1 || true
 
 read -ra all_nodes <<< "${SLURM_NODES_STR}"
 my_node_index=-1
