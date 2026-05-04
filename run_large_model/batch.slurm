@@ -153,9 +153,9 @@ srun --nodes="${SLURM_JOB_NUM_NODES}" \
     bash -lc '
         my_host="$(hostname -s)"
         if [[ "${my_host}" == "${HEAD_NODE}" ]]; then
-            bash "${SCRIPT_DIR}/head_node.sh"
+            ROLE=primary_head bash "${SCRIPT_DIR}/head_node.sh"
         elif [[ -n "${SECONDARY_HEAD}" && "${my_host}" == "${SECONDARY_HEAD}" ]]; then
-            bash "${SCRIPT_DIR}/secondary_head.sh"
+            ROLE=secondary_head bash "${SCRIPT_DIR}/head_node.sh"
         else
             read -ra _nodes <<< "${SLURM_NODES_STR}"
             _idx=-1
@@ -163,9 +163,9 @@ srun --nodes="${SLURM_JOB_NUM_NODES}" \
                 if [[ "${_nodes[$_i]}" == "${my_host}" ]]; then _idx=$_i; break; fi
             done
             if [[ -n "${SECONDARY_HEAD}" ]] && (( _idx >= INITIAL_NODES )); then
-                bash "${SCRIPT_DIR}/secondary_worker.sh"
+                ROLE=secondary_worker bash "${SCRIPT_DIR}/worker_node.sh"
             else
-                bash "${SCRIPT_DIR}/worker_node.sh"
+                ROLE=primary_worker bash "${SCRIPT_DIR}/worker_node.sh"
             fi
         fi
     '
