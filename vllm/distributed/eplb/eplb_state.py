@@ -763,44 +763,46 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
+        new_physical_to_logical_map = None
+
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
             if not self.is_async or is_profile:
-                # Get new expert mappings for the model
+                old_phy_map = eplb_model_state.physical_to_logical_map.cpu()
+                has_inactive_slots = (
+                    num_total_physical > num_replicas
+                    and rank_mapping is None
+                )
+                if has_inactive_slots:
+                    ep_size = ep_group.size()
+                    local_active = num_replicas // ep_size
+                    local_total = num_total_physical // ep_size
+                    # Extract active prefix from each rank's
+                    # [active..., inactive -1...] layout.
+                    old_phy_map = old_phy_map.reshape(
+                        -1, ep_size, local_total
+                    )[:, :, :local_active].reshape(
+                        -1, num_replicas
+                    ).contiguous()
+
                 new_physical_to_logical_map = self.policy.rebalance_experts(
                     global_expert_load_window.cpu(),
                     num_replicas,
                     num_groups,
                     num_nodes,
                     num_gpus,
-                    eplb_model_state.physical_to_logical_map.cpu(),
+                    old_phy_map,
                 )
 
-                # Expand active-slot output to tensor-slot space when
-                # EPLB operates on fewer replicas than total tensor slots.
-                if (
-                    num_total_physical > num_replicas
-                    and rank_mapping is None
-                ):
-                    ep_size = ep_group.size()
-                    local_active = num_replicas // ep_size
-                    local_total = num_total_physical // ep_size
+                if has_inactive_slots:
                     new_physical_to_logical_map = F.pad(
                         new_physical_to_logical_map.reshape(
                             -1, ep_size, local_active),
                         (0, local_total - local_active),
                         value=-1,
                     ).reshape(-1, num_total_physical)
-                    v = new_logical_to_physical_map >= 0
-                    gpu_id = (
-                        new_logical_to_physical_map[v] // local_active
-                    )
-                    new_logical_to_physical_map[v] = (
-                        gpu_id * local_total
-                        + new_logical_to_physical_map[v] % local_active
-                    )
 
                 # Update expert weights
                 rearrange_expert_weights_inplace(
@@ -847,7 +849,7 @@ class EplbState:
             self.rearrange_event.record()
 
         # Log the new physical_to_logical_map for debugging
-        if is_main_rank:
+        if is_main_rank and new_physical_to_logical_map is not None:
             num_physical = new_physical_to_logical_map.shape[1]
             layer0_map = new_physical_to_logical_map[0].tolist()
             slots_per_gpu_display = num_physical // num_gpus if num_gpus > 0 else num_physical
