@@ -1081,6 +1081,9 @@ class AsyncLLM(EngineClient):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
 
+        if num_redundant_experts is None and effective_cap < new_total:
+            num_redundant_experts = effective_cap - num_logical
+
         set_scaling_elastic_ep(True)
         try:
             await self.engine_core.scale_elastic_ep(
