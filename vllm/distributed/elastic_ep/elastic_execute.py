@@ -531,6 +531,8 @@ class ElasticEPScalingExecutor:
             bt.block_table.gpu.copy_(saved_gpu)
             bt.block_table.cpu.copy_(saved_cpu)
         if new_dp_size < old_dp_size:
+            if eplb_state.num_eplb_replicas is not None:
+                self._perform_eplb_reshuffle()
             self._set_eplb_suppressed(False)
 
     def _perform_eplb_reshuffle(
