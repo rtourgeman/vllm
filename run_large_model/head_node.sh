@@ -23,6 +23,7 @@ else
     MY_METRICS_PORT=9091
     MY_VLLM_LOG="${RUN_DIR}/vllm_server_B.log"
     MY_WAIT_NODES=$((TARGET_NODES - INITIAL_NODES))
+    SECONDARY_MODEL_NAME="${SECONDARY_MODEL_NAME:-/rtourgeman/models/DeepSeek-V2-Lite-Chat}"
 fi
 
 export RAY_ADDRESS="${MY_RAY_IP}:${MY_RAY_PORT}"
@@ -63,6 +64,8 @@ for ((attempt=1; attempt<=5; attempt++)); do
         --node-ip-address="${MY_RAY_IP}" \
         --num-gpus="${GPUS_PER_NODE}" \
         --metrics-export-port="${MY_METRICS_PORT}" \
+        --dashboard-agent-grpc-port=9094 \
+        --runtime-env-agent-port=9095 \
         --min-worker-port=20000 \
         --max-worker-port=29999; then
         break
@@ -76,7 +79,9 @@ wait_for_ray_nodes "${MY_WAIT_NODES}" "${RAY_WAIT_TIMEOUT}" || true
 ray status || true
 
 if [[ "${ROLE}" == "secondary_head" ]]; then
-    echo "[${my_node}] ${TAG}launching vLLM (secondary), log=${MY_VLLM_LOG}"
+    warm_lustre_cache "${SECONDARY_MODEL_NAME}"
+    echo "[${my_node}] ${TAG}launching vLLM (secondary, model=${SECONDARY_MODEL_NAME}), log=${MY_VLLM_LOG}"
+    MODEL_NAME="${SECONDARY_MODEL_NAME}" \
     DATA_PARALLEL_SIZE="${SECONDARY_DP_SIZE}" \
     DATA_PARALLEL_SIZE_LOCAL="${GPUS_PER_NODE}" \
     DATA_PARALLEL_ADDRESS="${SECONDARY_HEAD_IP}" \
@@ -85,6 +90,7 @@ if [[ "${ROLE}" == "secondary_head" ]]; then
     PORT="${PORT_B}" \
         bash "${SCRIPT_DIR}/serve.sh" >"${MY_VLLM_LOG}" 2>&1 &
 else
+    warm_lustre_cache "${MODEL_NAME}"
     echo "[${my_node}] ${TAG}launching vLLM, log=${MY_VLLM_LOG}"
     bash "${SCRIPT_DIR}/serve.sh" >"${MY_VLLM_LOG}" 2>&1 &
 fi
@@ -132,7 +138,8 @@ if [[ "${ROLE}" == "primary_head" ]]; then
         python3 examples/online_serving/elastic_ep/scale.py \
             --host "localhost" \
             --port "${PORT}" \
-            --new-dp-size "${TARGET_DP_SIZE}"
+            --new-dp-size "${TARGET_DP_SIZE}" \
+            --num-redundant-experts 24
 
         echo "[${my_node}] waiting 30s for scale-up to stabilize"
         sleep 30
@@ -148,7 +155,8 @@ if [[ "${ROLE}" == "primary_head" ]]; then
     ray stop -f 2>&1 || true
 
 else
-    echo "[${my_node}] ${TAG}running small benchmark (${SECONDARY_NUM_PROMPTS} prompts)"
+    echo "[${my_node}] ${TAG}running small benchmark (${SECONDARY_NUM_PROMPTS} prompts, model=${SECONDARY_MODEL_NAME})"
+    MODEL_NAME="${SECONDARY_MODEL_NAME}" \
     NUM_PROMPTS="${SECONDARY_NUM_PROMPTS}" \
     MAX_CONCURRENCY="${SECONDARY_NUM_PROMPTS}" \
     BENCH_HOST="localhost" \

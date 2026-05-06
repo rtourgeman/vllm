@@ -63,6 +63,19 @@ print(sum(1 for n in ray.nodes() if n.get('Alive')))
     return 1
 }
 
+warm_lustre_cache() {
+    local model_dir="${1}"
+    if [[ -d "${model_dir}" ]]; then
+        echo "Warming Lustre metadata cache for ${model_dir}"
+        local count
+        count="$(ls "${model_dir}"/model-*.safetensors 2>/dev/null | wc -l)"
+        echo "  Found ${count} safetensors shard(s)"
+        if [[ "${count}" -lt 1 ]]; then
+            echo "WARNING: no safetensors shards found in ${model_dir}" >&2
+        fi
+    fi
+}
+
 join_ray_with_retry() {
     local address="${1}"
     local gpus="${2:-${GPUS_PER_NODE:-8}}"
@@ -73,7 +86,11 @@ join_ray_with_retry() {
     for ((attempt=1; attempt<=max_attempts; attempt++)); do
         ray stop -f 2>&1 || true
         sleep 2
-        if ray start --address="${address}" --num-gpus="${gpus}" --metrics-export-port=9090 --block; then
+        if ray start --address="${address}" --num-gpus="${gpus}" \
+            --min-worker-port=20000 --max-worker-port=29999 \
+            --metrics-export-port=9090 \
+            --dashboard-agent-grpc-port=9094 \
+            --runtime-env-agent-port=9095 --block; then
             return 0
         fi
         echo "  Ray join attempt ${attempt}/${max_attempts} failed, retrying"

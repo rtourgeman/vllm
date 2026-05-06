@@ -5,7 +5,8 @@
 SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
 # Container
-IMAGE="${IMAGE:-/lustre/fsw/portfolios/network/users/rtourgeman/latest_rebase_20_4_26_v9.sqsh}"
+#IMAGE="${IMAGE:-/lustre/fsw/portfolios/network/users/rtourgeman/latest_rebase_20_4_26_v9.sqsh}"
+IMAGE="${IMAGE:-/lustre/fsw/portfolios/network/users/rtourgeman/latest_rebase_20_4_26_v10.sqsh}"
 MOUNT_SRC="${MOUNT_SRC:-/lustre/fsw/portfolios/network/users/rtourgeman}"
 MOUNT_DST="${MOUNT_DST:-/rtourgeman}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
@@ -16,8 +17,8 @@ BATCH_PARTITION="${BATCH_PARTITION:-batch}"
 TIME="${TIME:-01:00:00}"
 
 # Model / vLLM
-MODEL_NAME="${MODEL_NAME:-deepseek-ai/DeepSeek-V3}"
-#MODEL_NAME="${MODEL_NAME:-deepseek-ai/DeepSeek-V2-Lite-Chat}"
+MODEL_NAME="${MODEL_NAME:-/rtourgeman/models/DeepSeek-V3}"
+SECONDARY_MODEL_NAME="${SECONDARY_MODEL_NAME:-/rtourgeman/models/DeepSeek-V2-Lite-Chat}"
 PORT="${PORT:-8006}"
 HOST="${HOST:-0.0.0.0}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"

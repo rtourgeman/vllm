@@ -13,6 +13,8 @@ trap "ray stop -f 2>&1 || true; pkill -9 -f 'raylet|runtime_env_agent' 2>&1 || t
 cd "${VLLM_WORKDIR}"
 ray stop -f 2>&1 || true
 
+warm_lustre_cache "${MODEL_NAME}"
+
 if [[ "${ROLE}" == "primary_worker" ]]; then
     export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
     echo "[${my_node}] joining primary Ray cluster"
@@ -22,7 +24,10 @@ else
     sleep 15
     ray start --address="${SECONDARY_HEAD_IP}:${RAY_PORT_B}" \
         --num-gpus="${GPUS_PER_NODE}" \
-        --metrics-export-port=9091
+        --min-worker-port=20000 --max-worker-port=29999 \
+        --metrics-export-port=9091 \
+        --dashboard-agent-grpc-port=9094 \
+        --runtime-env-agent-port=9095
 
     echo "[${my_node}][B] joined secondary Ray, waiting for scale-up signal"
     while [[ ! -f "${SIGNAL_FILE}" ]]; do
