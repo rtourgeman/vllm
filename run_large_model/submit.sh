@@ -14,7 +14,7 @@ RUN_BASELINE_BENCH="auto"
 
 usage() {
     cat <<EOF
-Usage: $0 [OPTIONS]
+Usage: $0 [OPTIONS] 
 
 Submit a Slurm batch job that serves DeepSeek V3 and runs one benchmark.
 
