@@ -157,7 +157,7 @@ if [[ "${ROLE}" == "primary_head" ]]; then
     vllm_pid=""
     sleep 3
     ray stop -f 2>&1 || true
-    exit 0
+    scancel "${SLURM_JOB_ID}" 2>/dev/null || true
 
 else
     echo "[${my_node}] ${TAG}running small benchmark (${SECONDARY_NUM_PROMPTS} prompts, model=${SECONDARY_MODEL_NAME})"
