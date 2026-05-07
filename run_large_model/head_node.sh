@@ -117,9 +117,10 @@ done
 echo "[${my_node}] ${TAG}vLLM is running"
 
 if [[ "${ROLE}" == "primary_head" ]]; then
+    BENCH_TAG="np${NUM_PROMPTS}_c${MAX_CONCURRENCY}_i${RANDOM_INPUT_LEN}_o${RANDOM_OUTPUT_LEN}"
     if [[ "${RUN_BASELINE_BENCH}" == "true" ]]; then
         echo "[${my_node}] running baseline benchmark at ${INITIAL_DP_SIZE} GPUs"
-        BENCH_LOG_FILE="${RUN_DIR}/benchmark_initial_${INITIAL_DP_SIZE}gpu.log" \
+        BENCH_LOG_FILE="${RUN_DIR}/bench_${INITIAL_DP_SIZE}gpu_${BENCH_TAG}.log" \
             bash "${SCRIPT_DIR}/bench.sh"
     fi
 
@@ -135,18 +136,22 @@ if [[ "${ROLE}" == "primary_head" ]]; then
 
         ray status || true
         echo "[${my_node}] scaling vLLM to ${TARGET_DP_SIZE} GPUs"
+        scale_start=$(date +%s)
         python3 examples/online_serving/elastic_ep/scale.py \
             --host "localhost" \
             --port "${PORT}" \
             --new-dp-size "${TARGET_DP_SIZE}" \
-            --num-redundant-experts 24
+            --num-redundant-experts 24 \
+            --timeout 600
+        scale_end=$(date +%s)
+        echo "[${my_node}] scale-up completed in $((scale_end - scale_start))s"
 
         echo "[${my_node}] waiting 30s for scale-up to stabilize"
         sleep 30
     fi
 
     echo "[${my_node}] running final benchmark at ${TARGET_DP_SIZE} GPUs"
-    BENCH_LOG_FILE="${RUN_DIR}/benchmark_final_${TARGET_DP_SIZE}gpu.log" \
+    BENCH_LOG_FILE="${RUN_DIR}/bench_${TARGET_DP_SIZE}gpu_${BENCH_TAG}.log" \
         bash "${SCRIPT_DIR}/bench.sh"
     echo "[${my_node}] benchmark finished, shutting down"
     kill "${vllm_pid}" 2>&1 || true
@@ -162,7 +167,7 @@ else
     BENCH_HOST="localhost" \
     PORT="${PORT_B}" \
     WAIT_FOR_SERVER="false" \
-    BENCH_LOG_FILE="${RUN_DIR}/benchmark_secondary_${SECONDARY_DP_SIZE}gpu.log" \
+    BENCH_LOG_FILE="${RUN_DIR}/bench_secondary_${SECONDARY_DP_SIZE}gpu_np${SECONDARY_NUM_PROMPTS}.log" \
         bash "${SCRIPT_DIR}/bench.sh" || true
 
     echo "[${my_node}] ${TAG}secondary benchmark done, waiting for scale-up signal"
