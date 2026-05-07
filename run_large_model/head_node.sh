@@ -141,8 +141,7 @@ if [[ "${ROLE}" == "primary_head" ]]; then
             --host "localhost" \
             --port "${PORT}" \
             --new-dp-size "${TARGET_DP_SIZE}" \
-            --num-redundant-experts 24 \
-            --timeout 600
+            --num-redundant-experts 24
         scale_end=$(date +%s)
         echo "[${my_node}] scale-up completed in $((scale_end - scale_start))s"
 
