@@ -37,3 +37,4 @@ if [[ -n "${BENCH_LOG_FILE}" ]]; then
 else
     exec "${cmd[@]}"
 fi
+
