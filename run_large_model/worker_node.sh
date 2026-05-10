@@ -8,6 +8,7 @@ export VLLM_HOST_IP="$(get_routable_ip)"
 
 my_node="$(hostname -s)"
 ROLE="${ROLE:-primary_worker}"
+DONE_FILE="${RUN_DIR}/job_done.signal"
 trap "ray stop -f 2>&1 || true; pkill -9 -f 'raylet|runtime_env_agent' 2>&1 || true" EXIT
 
 cd "${VLLM_WORKDIR}"
@@ -17,8 +18,27 @@ warm_lustre_cache "${MODEL_NAME}"
 
 if [[ "${ROLE}" == "primary_worker" ]]; then
     export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
-    echo "[${my_node}] joining primary Ray cluster"
-    join_ray_with_retry "${HEAD_NODE_IP}:${RAY_PORT}" "${GPUS_PER_NODE}"
+
+    while true; do
+        if [[ -f "${DONE_FILE}" ]]; then
+            echo "[${my_node}] job done, exiting"
+            break
+        fi
+
+        echo "[${my_node}] joining primary Ray cluster"
+        join_ray_with_retry "${HEAD_NODE_IP}:${RAY_PORT}" "${GPUS_PER_NODE}"
+
+        if [[ -f "${DONE_FILE}" ]]; then
+            echo "[${my_node}] job done, exiting"
+            break
+        fi
+
+        echo "[${my_node}] Ray exited, cleaning up for next phase"
+        ray stop -f 2>&1 || true
+        pkill -9 -f "raylet|runtime_env_agent" 2>&1 || true
+        rm -rf /data/tmp/ray/session_* 2>/dev/null || true
+        sleep 5
+    done
 else
     echo "[${my_node}][B] joining secondary Ray cluster (non-blocking)"
     sleep 15

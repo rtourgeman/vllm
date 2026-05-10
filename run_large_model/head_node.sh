@@ -195,15 +195,25 @@ fi
 BENCH_TAG="np${NUM_PROMPTS}_c${MAX_CONCURRENCY}_i${RANDOM_INPUT_LEN}_o${RANDOM_OUTPUT_LEN}"
 warm_lustre_cache "${MODEL_NAME}"
 
+restart_ray() {
+    echo "[${my_node}] restarting Ray cluster (clean session)"
+    stop_vllm
+    ray stop -f 2>&1 || true
+    pkill -9 -f "raylet|runtime_env_agent" 2>&1 || true
+    rm -rf /data/tmp/ray/session_* 2>/dev/null || true
+    sleep 5
+    start_ray_head
+    echo "[${my_node}] waiting for ${TARGET_NODES} Ray node(s)"
+    wait_for_ray_nodes "${TARGET_NODES}" "${RAY_WAIT_TIMEOUT}" || true
+    ray status || true
+}
+
 # ────────────────────────────────────────────────────
 # Phase 1: 32-GPU baseline (clean EPLB)
 # ────────────────────────────────────────────────────
 echo ""
 echo "========== PHASE 1: ${INITIAL_DP_SIZE}-GPU baseline =========="
-start_ray_head
-echo "[${my_node}] waiting for ${INITIAL_NODES} Ray node(s)"
-wait_for_ray_nodes "${INITIAL_NODES}" "${RAY_WAIT_TIMEOUT}" || true
-ray status || true
+restart_ray
 
 launch_vllm "${RUN_DIR}/vllm_phase1_${INITIAL_DP_SIZE}gpu.log" "${INITIAL_DP_SIZE}"
 wait_vllm_ready "${RUN_DIR}/vllm_phase1_${INITIAL_DP_SIZE}gpu.log"
@@ -211,11 +221,12 @@ wait_vllm_ready "${RUN_DIR}/vllm_phase1_${INITIAL_DP_SIZE}gpu.log"
 run_bench "phase1" "${INITIAL_DP_SIZE}"
 
 stop_vllm
-ray stop -f 2>&1 || true
 echo "[${my_node}] Phase 1 done"
 
 if [[ "${RUN_ELASTIC_SCALE}" != "true" ]]; then
     echo "[${my_node}] no elastic scale requested, exiting"
+    ray stop -f 2>&1 || true
+    touch "${RUN_DIR}/job_done.signal"
     exit 0
 fi
 
@@ -224,9 +235,7 @@ fi
 # ────────────────────────────────────────────────────
 echo ""
 echo "========== PHASE 2: ${INITIAL_DP_SIZE}→${TARGET_DP_SIZE} elastic scale-up =========="
-start_ray_head
-echo "[${my_node}] waiting for ${INITIAL_NODES} Ray node(s)"
-wait_for_ray_nodes "${INITIAL_NODES}" "${RAY_WAIT_TIMEOUT}" || true
+restart_ray
 
 launch_vllm "${RUN_DIR}/vllm_phase2_${INITIAL_DP_SIZE}to${TARGET_DP_SIZE}gpu.log" "${INITIAL_DP_SIZE}"
 wait_vllm_ready "${RUN_DIR}/vllm_phase2_${INITIAL_DP_SIZE}to${TARGET_DP_SIZE}gpu.log"
@@ -257,20 +266,16 @@ sleep 30
 run_bench "phase2_scaled" "${TARGET_DP_SIZE}"
 
 stop_vllm
-ray stop -f 2>&1 || true
 rm -f "${SIGNAL_FILE}"
 echo "[${my_node}] Phase 2 done"
 
 # ────────────────────────────────────────────────────
-# Phase 3: 40-GPU static (clean EPLB)
+# Phase 3: 40-GPU static (clean EPLB, 24 redundant)
 # ────────────────────────────────────────────────────
 echo ""
 echo "========== PHASE 3: ${TARGET_DP_SIZE}-GPU static (24 redundant experts) =========="
 NUM_REDUNDANT_EXPERTS=24
-start_ray_head
-echo "[${my_node}] waiting for ${TARGET_NODES} Ray node(s)"
-wait_for_ray_nodes "${TARGET_NODES}" "${RAY_WAIT_TIMEOUT}" || true
-ray status || true
+restart_ray
 
 launch_vllm "${RUN_DIR}/vllm_phase3_${TARGET_DP_SIZE}gpu.log" "${TARGET_DP_SIZE}"
 wait_vllm_ready "${RUN_DIR}/vllm_phase3_${TARGET_DP_SIZE}gpu.log"
@@ -285,4 +290,5 @@ echo "[${my_node}] Phase 3 done"
 echo ""
 echo "========== All phases complete =========="
 echo "[${my_node}] benchmark finished, shutting down"
+touch "${RUN_DIR}/job_done.signal"
 exit 0
