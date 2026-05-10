@@ -57,28 +57,85 @@ trap cleanup EXIT
 
 cd "${VLLM_WORKDIR}"
 
-for ((attempt=1; attempt<=5; attempt++)); do
-    ray stop -f 2>&1 || true
-    if ray start --head \
-        --port="${MY_RAY_PORT}" \
-        --node-ip-address="${MY_RAY_IP}" \
-        --num-gpus="${GPUS_PER_NODE}" \
-        --metrics-export-port="${MY_METRICS_PORT}" \
-        --dashboard-agent-grpc-port=9094 \
-        --runtime-env-agent-port=9095 \
-        --min-worker-port=20000 \
-        --max-worker-port=29999; then
-        break
+start_ray_head() {
+    for ((attempt=1; attempt<=5; attempt++)); do
+        ray stop -f 2>&1 || true
+        if ray start --head \
+            --port="${MY_RAY_PORT}" \
+            --node-ip-address="${MY_RAY_IP}" \
+            --num-gpus="${GPUS_PER_NODE}" \
+            --metrics-export-port="${MY_METRICS_PORT}" \
+            --dashboard-agent-grpc-port=9094 \
+            --runtime-env-agent-port=9095 \
+            --min-worker-port=20000 \
+            --max-worker-port=29999; then
+            return 0
+        fi
+        echo "[${my_node}] ${TAG}Ray head attempt ${attempt}/5 failed, retrying"
+        sleep 5
+    done
+    return 1
+}
+
+launch_vllm() {
+    local log_file="${1}"
+    local dp_size="${2}"
+    echo "[${my_node}] launching vLLM (dp=${dp_size}), log=${log_file}"
+    DATA_PARALLEL_SIZE="${dp_size}" \
+        bash "${SCRIPT_DIR}/serve.sh" >"${log_file}" 2>&1 &
+    vllm_pid="$!"
+}
+
+wait_vllm_ready() {
+    local log_file="${1}"
+    local waited=0
+    echo "[${my_node}] waiting for vLLM to start"
+    while ! grep -q "Application startup complete" "${log_file}" 2>/dev/null; do
+        if ! kill -0 "${vllm_pid}" >/dev/null 2>&1; then
+            echo "[${my_node}] vLLM exited before healthy" >&2
+            tail -20 "${log_file}" >&2 || true
+            wait "${vllm_pid}" || true
+            return 1
+        fi
+        if (( waited >= SERVER_WAIT_TIMEOUT )); then
+            echo "[${my_node}] timed out waiting for vLLM" >&2
+            tail -20 "${log_file}" >&2 || true
+            return 1
+        fi
+        sleep 15
+        waited=$((waited + 15))
+        echo "[${my_node}] still waiting for vLLM startup... ${waited}s"
+    done
+    echo "[${my_node}] vLLM is running"
+}
+
+stop_vllm() {
+    if [[ -n "${vllm_pid}" ]]; then
+        echo "[${my_node}] stopping vLLM pid=${vllm_pid}"
+        kill "${vllm_pid}" 2>&1 || true
+        sleep 5
+        kill -9 "${vllm_pid}" 2>&1 || true
+        wait "${vllm_pid}" 2>/dev/null || true
+        vllm_pid=""
     fi
-    echo "[${my_node}] ${TAG}Ray head attempt ${attempt}/5 failed, retrying"
-    sleep 5
-done
+}
 
-echo "[${my_node}] ${TAG}waiting for ${MY_WAIT_NODES} Ray node(s)"
-wait_for_ray_nodes "${MY_WAIT_NODES}" "${RAY_WAIT_TIMEOUT}" || true
-ray status || true
+run_bench() {
+    local label="${1}"
+    local dp="${2}"
+    local log="${RUN_DIR}/bench_${label}_${dp}gpu_${BENCH_TAG}.log"
+    echo "[${my_node}] running benchmark '${label}' at ${dp} GPUs -> ${log}"
+    BENCH_LOG_FILE="${log}" bash "${SCRIPT_DIR}/bench.sh"
+}
 
+# ── secondary head: unchanged ──
 if [[ "${ROLE}" == "secondary_head" ]]; then
+    start_ray_head
+
+    echo "[${my_node}] ${TAG}waiting for ${MY_WAIT_NODES} Ray node(s)"
+    wait_for_ray_nodes "${MY_WAIT_NODES}" "${RAY_WAIT_TIMEOUT}" || true
+    ray status || true
+
     warm_lustre_cache "${SECONDARY_MODEL_NAME}"
     echo "[${my_node}] ${TAG}launching vLLM (secondary, model=${SECONDARY_MODEL_NAME}), log=${MY_VLLM_LOG}"
     MODEL_NAME="${SECONDARY_MODEL_NAME}" \
@@ -89,77 +146,10 @@ if [[ "${ROLE}" == "secondary_head" ]]; then
     VLLM_NIXL_EP_MAX_NUM_RANKS="${SECONDARY_DP_SIZE}" \
     PORT="${PORT_B}" \
         bash "${SCRIPT_DIR}/serve.sh" >"${MY_VLLM_LOG}" 2>&1 &
-else
-    warm_lustre_cache "${MODEL_NAME}"
-    echo "[${my_node}] ${TAG}launching vLLM, log=${MY_VLLM_LOG}"
-    bash "${SCRIPT_DIR}/serve.sh" >"${MY_VLLM_LOG}" 2>&1 &
-fi
-vllm_pid="$!"
+    vllm_pid="$!"
 
-echo "[${my_node}] ${TAG}waiting for vLLM to start"
-waited=0
-while ! grep -q "Application startup complete" "${MY_VLLM_LOG}" 2>/dev/null; do
-    if ! kill -0 "${vllm_pid}" >/dev/null 2>&1; then
-        echo "[${my_node}] ${TAG}vLLM exited before healthy" >&2
-        tail -20 "${MY_VLLM_LOG}" >&2 || true
-        wait "${vllm_pid}" || true
-        exit 1
-    fi
-    if (( waited >= SERVER_WAIT_TIMEOUT )); then
-        echo "[${my_node}] ${TAG}timed out waiting for vLLM" >&2
-        tail -20 "${MY_VLLM_LOG}" >&2 || true
-        exit 1
-    fi
-    sleep 15
-    waited=$((waited + 15))
-    echo "[${my_node}] ${TAG}still waiting for vLLM startup... ${waited}s"
-done
-echo "[${my_node}] ${TAG}vLLM is running"
+    wait_vllm_ready "${MY_VLLM_LOG}"
 
-if [[ "${ROLE}" == "primary_head" ]]; then
-    BENCH_TAG="np${NUM_PROMPTS}_c${MAX_CONCURRENCY}_i${RANDOM_INPUT_LEN}_o${RANDOM_OUTPUT_LEN}"
-    if [[ "${RUN_BASELINE_BENCH}" == "true" ]]; then
-        echo "[${my_node}] running baseline benchmark at ${INITIAL_DP_SIZE} GPUs"
-        BENCH_LOG_FILE="${RUN_DIR}/bench_${INITIAL_DP_SIZE}gpu_${BENCH_TAG}.log" \
-            bash "${SCRIPT_DIR}/bench.sh"
-    fi
-
-    if [[ "${RUN_ELASTIC_SCALE}" == "true" ]]; then
-        echo "[${my_node}] signaling additional nodes to join Ray"
-        touch "${SIGNAL_FILE}"
-
-        echo "[${my_node}] waiting for ${TARGET_NODES} Ray node(s) before scale-up"
-        if ! wait_for_ray_nodes "${TARGET_NODES}" "${RAY_WAIT_TIMEOUT}"; then
-            echo "[${my_node}] scale-up aborted: not enough Ray nodes" >&2
-            exit 1
-        fi
-
-        ray status || true
-        echo "[${my_node}] scaling vLLM to ${TARGET_DP_SIZE} GPUs"
-        scale_start=$(date +%s)
-        python3 examples/online_serving/elastic_ep/scale.py \
-            --host "localhost" \
-            --port "${PORT}" \
-            --new-dp-size "${TARGET_DP_SIZE}" \
-            --num-redundant-experts 24
-        scale_end=$(date +%s)
-        echo "[${my_node}] scale-up completed in $((scale_end - scale_start))s"
-
-        echo "[${my_node}] waiting 30s for scale-up to stabilize"
-        sleep 30
-    fi
-
-    echo "[${my_node}] running final benchmark at ${TARGET_DP_SIZE} GPUs"
-    BENCH_LOG_FILE="${RUN_DIR}/bench_${TARGET_DP_SIZE}gpu_${BENCH_TAG}.log" \
-        bash "${SCRIPT_DIR}/bench.sh"
-    echo "[${my_node}] benchmark finished, shutting down"
-    kill "${vllm_pid}" 2>&1 || true
-    vllm_pid=""
-    sleep 3
-    ray stop -f 2>&1 || true
-    scancel "${SLURM_JOB_ID}" 2>/dev/null || true
-
-else
     echo "[${my_node}] ${TAG}running small benchmark (${SECONDARY_NUM_PROMPTS} prompts, model=${SECONDARY_MODEL_NAME})"
     MODEL_NAME="${SECONDARY_MODEL_NAME}" \
     NUM_PROMPTS="${SECONDARY_NUM_PROMPTS}" \
@@ -197,4 +187,102 @@ else
     echo "[${my_node}] ${TAG}joining primary Ray cluster at ${HEAD_NODE_IP}:${RAY_PORT}"
     export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
     join_ray_with_retry "${HEAD_NODE_IP}:${RAY_PORT}" "${GPUS_PER_NODE}"
+    exit 0
 fi
+
+# ── primary head: 3-phase apple-to-apple benchmark ──
+
+BENCH_TAG="np${NUM_PROMPTS}_c${MAX_CONCURRENCY}_i${RANDOM_INPUT_LEN}_o${RANDOM_OUTPUT_LEN}"
+warm_lustre_cache "${MODEL_NAME}"
+
+# ────────────────────────────────────────────────────
+# Phase 1: 32-GPU baseline (clean EPLB)
+# ────────────────────────────────────────────────────
+echo ""
+echo "========== PHASE 1: ${INITIAL_DP_SIZE}-GPU baseline =========="
+start_ray_head
+echo "[${my_node}] waiting for ${INITIAL_NODES} Ray node(s)"
+wait_for_ray_nodes "${INITIAL_NODES}" "${RAY_WAIT_TIMEOUT}" || true
+ray status || true
+
+launch_vllm "${RUN_DIR}/vllm_phase1_${INITIAL_DP_SIZE}gpu.log" "${INITIAL_DP_SIZE}"
+wait_vllm_ready "${RUN_DIR}/vllm_phase1_${INITIAL_DP_SIZE}gpu.log"
+
+run_bench "phase1" "${INITIAL_DP_SIZE}"
+
+stop_vllm
+ray stop -f 2>&1 || true
+echo "[${my_node}] Phase 1 done"
+
+if [[ "${RUN_ELASTIC_SCALE}" != "true" ]]; then
+    echo "[${my_node}] no elastic scale requested, exiting"
+    exit 0
+fi
+
+# ────────────────────────────────────────────────────
+# Phase 2: 32→40 elastic scale-up (clean EPLB)
+# ────────────────────────────────────────────────────
+echo ""
+echo "========== PHASE 2: ${INITIAL_DP_SIZE}→${TARGET_DP_SIZE} elastic scale-up =========="
+start_ray_head
+echo "[${my_node}] waiting for ${INITIAL_NODES} Ray node(s)"
+wait_for_ray_nodes "${INITIAL_NODES}" "${RAY_WAIT_TIMEOUT}" || true
+
+launch_vllm "${RUN_DIR}/vllm_phase2_${INITIAL_DP_SIZE}to${TARGET_DP_SIZE}gpu.log" "${INITIAL_DP_SIZE}"
+wait_vllm_ready "${RUN_DIR}/vllm_phase2_${INITIAL_DP_SIZE}to${TARGET_DP_SIZE}gpu.log"
+
+echo "[${my_node}] signaling additional nodes to join Ray"
+touch "${SIGNAL_FILE}"
+
+echo "[${my_node}] waiting for ${TARGET_NODES} Ray node(s) before scale-up"
+if ! wait_for_ray_nodes "${TARGET_NODES}" "${RAY_WAIT_TIMEOUT}"; then
+    echo "[${my_node}] scale-up aborted: not enough Ray nodes" >&2
+    exit 1
+fi
+
+ray status || true
+echo "[${my_node}] scaling vLLM to ${TARGET_DP_SIZE} GPUs"
+scale_start=$(date +%s)
+python3 examples/online_serving/elastic_ep/scale.py \
+    --host "localhost" \
+    --port "${PORT}" \
+    --new-dp-size "${TARGET_DP_SIZE}" \
+    --num-redundant-experts 24
+scale_end=$(date +%s)
+echo "[${my_node}] scale-up completed in $((scale_end - scale_start))s"
+
+echo "[${my_node}] waiting 30s for scale-up to stabilize"
+sleep 30
+
+run_bench "phase2_scaled" "${TARGET_DP_SIZE}"
+
+stop_vllm
+ray stop -f 2>&1 || true
+rm -f "${SIGNAL_FILE}"
+echo "[${my_node}] Phase 2 done"
+
+# ────────────────────────────────────────────────────
+# Phase 3: 40-GPU static (clean EPLB)
+# ────────────────────────────────────────────────────
+echo ""
+echo "========== PHASE 3: ${TARGET_DP_SIZE}-GPU static (24 redundant experts) =========="
+NUM_REDUNDANT_EXPERTS=24
+start_ray_head
+echo "[${my_node}] waiting for ${TARGET_NODES} Ray node(s)"
+wait_for_ray_nodes "${TARGET_NODES}" "${RAY_WAIT_TIMEOUT}" || true
+ray status || true
+
+launch_vllm "${RUN_DIR}/vllm_phase3_${TARGET_DP_SIZE}gpu.log" "${TARGET_DP_SIZE}"
+wait_vllm_ready "${RUN_DIR}/vllm_phase3_${TARGET_DP_SIZE}gpu.log"
+
+run_bench "phase3" "${TARGET_DP_SIZE}"
+
+stop_vllm
+save_ray_logs
+ray stop -f 2>&1 || true
+echo "[${my_node}] Phase 3 done"
+
+echo ""
+echo "========== All phases complete =========="
+echo "[${my_node}] benchmark finished, shutting down"
+exit 0
