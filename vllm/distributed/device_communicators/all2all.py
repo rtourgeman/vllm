@@ -368,6 +368,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         buffer = Buffer(
             rank=self.rank,
             tcp_store_group=self.tcp_store_group.store,
+            timeout_ms=100000,
         )
         buffer.update_memory_buffers(
             num_ranks=self.max_num_ep_ranks,
