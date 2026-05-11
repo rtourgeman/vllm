@@ -30,7 +30,7 @@ run_dir=${RUN_DIR}
 ============================================================
 EOF
 
-export SCRIPT_DIR HEAD_IP RAY_PORT RPC_PORT DP_SIZE RUN_DIR REDUNDANT PROMPTS CONCURRENCY
+export SCRIPT_DIR HEAD_IP RAY_PORT RPC_PORT DP_SIZE RUN_DIR REDUNDANT PROMPTS CONCURRENCY MODEL_NAME
 
 srun --nodes="${NUM_NODES}" --ntasks-per-node=1 \
     --container-image="${CONTAINER_IMAGE}" \
@@ -46,7 +46,7 @@ my_node="$(hostname -s)"
 if [[ "${my_node}" == "'"${HEAD}"'" ]]; then
     # ── HEAD NODE ──
     ray stop -f 2>&1 || true
-    rm -rf /data/tmp/ray/session_* 2>/dev/null || true
+    rm -rf /data/tmp/ray/session_* || true
 
     ray start --head --port="${RAY_PORT}" \
         --node-ip-address="${HEAD_IP}" \
@@ -60,7 +60,7 @@ if [[ "${my_node}" == "'"${HEAD}"'" ]]; then
     wait_for_ray_nodes '"${NUM_NODES}"' 300 || true
     ray status || true
 
-    warm_lustre_cache /rtourgeman/models/DeepSeek-V3
+    warm_lustre_cache "${MODEL_NAME}"
 
     # Launch vLLM
     NUM_REDUNDANT_EXPERTS="${REDUNDANT}" \
@@ -75,7 +75,8 @@ if [[ "${my_node}" == "'"${HEAD}"'" ]]; then
     waited=0
     while ! grep -q "Application startup complete" "${RUN_DIR}/vllm_server.log" 2>/dev/null; do
         if ! kill -0 "${vllm_pid}" 2>/dev/null; then
-            echo "[${my_node}] vLLM crashed"; tail -20 "${RUN_DIR}/vllm_server.log" 2>/dev/null; exit 1
+            echo "[${my_node}] vLLM crashed; see ${RUN_DIR}/vllm_server.log"
+            exit 1
         fi
         (( waited >= 1200 )) && { echo "[${my_node}] vLLM startup timeout"; exit 1; }
         sleep 15; waited=$((waited + 15))
@@ -83,20 +84,18 @@ if [[ "${my_node}" == "'"${HEAD}"'" ]]; then
     done
     echo "[${my_node}] vLLM is ready"
 
-    TAG="np${PROMPTS}_c${CONCURRENCY}_i1024_o1024"
-
     # Warmup (1000 prompts, concurrency=256)
     echo "[${my_node}] running warmup benchmark"
     NUM_PROMPTS=1000 MAX_CONCURRENCY=256 \
     BENCH_HOST=localhost WAIT_FOR_SERVER=false \
-    BENCH_LOG_FILE="${RUN_DIR}/bench_warmup_${TAG}.log" \
+    BENCH_LOG_FILE="${RUN_DIR}/bench_warmup_np1000_c256_i1024_o1024.log" \
         bash "${SCRIPT_DIR}/bench.sh"
 
     # Real benchmark
     echo "[${my_node}] running real benchmark"
     NUM_PROMPTS="${PROMPTS}" MAX_CONCURRENCY="${CONCURRENCY}" \
     BENCH_HOST=localhost WAIT_FOR_SERVER=false \
-    BENCH_LOG_FILE="${RUN_DIR}/bench_${DP_SIZE}gpu_${TAG}.log" \
+    BENCH_LOG_FILE="${RUN_DIR}/bench_${DP_SIZE}gpu_np${PROMPTS}_c${CONCURRENCY}_i1024_o1024.log" \
         bash "${SCRIPT_DIR}/bench.sh"
 
     echo "[${my_node}] done, shutting down"
@@ -105,8 +104,8 @@ if [[ "${my_node}" == "'"${HEAD}"'" ]]; then
 else
     # ── WORKER NODE ──
     ray stop -f 2>&1 || true
-    rm -rf /data/tmp/ray/session_* 2>/dev/null || true
-    warm_lustre_cache /rtourgeman/models/DeepSeek-V3
+    rm -rf /data/tmp/ray/session_* || true
+    warm_lustre_cache "${MODEL_NAME}"
     export RAY_ADDRESS="${HEAD_IP}:${RAY_PORT}"
     join_ray_with_retry "${HEAD_IP}:${RAY_PORT}" 8
 fi

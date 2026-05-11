@@ -18,7 +18,6 @@ TIME="${TIME:-01:00:00}"
 
 # Model / vLLM
 MODEL_NAME="${MODEL_NAME:-/rtourgeman/models/DeepSeek-V3}"
-SECONDARY_MODEL_NAME="${SECONDARY_MODEL_NAME:-/rtourgeman/models/DeepSeek-V2-Lite-Chat}"
 PORT="${PORT:-8006}"
 HOST="${HOST:-0.0.0.0}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
