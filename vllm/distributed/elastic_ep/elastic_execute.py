@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import gc
+import time
 import weakref
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
@@ -54,6 +55,41 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
         FusedMoEMethodBase,
     )
+
+
+class SwitchAndPrepareTimer:
+    """Detailed timing for switch_and_prepare stages."""
+
+    def __init__(self):
+        self.stage_times: dict[str, float] = {}
+        self.current_stage: str | None = None
+        self.stage_start: float = 0
+
+    def start(self, stage_name: str):
+        if self.current_stage:
+            self.end()
+        self.current_stage = stage_name
+        self.stage_start = time.perf_counter()
+
+    def end(self):
+        if self.current_stage:
+            elapsed = (time.perf_counter() - self.stage_start) * 1000
+            self.stage_times[self.current_stage] = elapsed
+            self.current_stage = None
+
+    def log_summary(self, ep_rank: int):
+        self.end()
+        if not self.stage_times:
+            return
+        total = sum(self.stage_times.values())
+        logger.info("[Elastic EP Timer] --- switch_and_prepare breakdown "
+                    "(ep_rank=%d) ---", ep_rank)
+        for stage, duration in self.stage_times.items():
+            pct = (duration / total * 100) if total > 0 else 0
+            logger.info("[Elastic EP Timer]     %s: %.2fms (%.1f%%)",
+                        stage, duration, pct)
+        logger.info("[Elastic EP Timer]     switch_and_prepare total: "
+                    "%.2fms", total)
 
 
 def batch_transfer_weights(
@@ -349,10 +385,15 @@ class ElasticEPScalingExecutor:
         _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
 
     def switch_and_prepare(self) -> None:
+        timer = SwitchAndPrepareTimer()
+        ep_rank = get_ep_group().rank
+
+        timer.start("release_cuda_graphs")
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
-
         self._release_cuda_graphs()
+
+        timer.start("switch_to_standby_groups")
         _replace_active_groups(**pop_standby_groups())
 
         parallel_config = self.worker.vllm_config.parallel_config
@@ -381,7 +422,7 @@ class ElasticEPScalingExecutor:
             reconfig_request.new_data_parallel_master_port
         )
 
-        # Reconfigure MoE modules with new EP size
+        timer.start("reconfigure_moe_modules")
         moe_modules = [
             module
             for module in self.worker.model_runner.model.modules()
@@ -402,6 +443,7 @@ class ElasticEPScalingExecutor:
             module.moe_config.moe_parallel_config = module.moe_parallel_config
 
         # Update EPLB state
+        timer.start("update_eplb_state")
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
         model_config = self.worker.model_runner.model_config
@@ -450,6 +492,7 @@ class ElasticEPScalingExecutor:
             ]
             eplb_state.num_valid_physical_experts = num_physical_experts
 
+        timer.start("set_eplb_state_and_metadata")
         model = self.worker.model_runner.get_model()
         model.expert_weights = []
         with set_current_vllm_config(self.worker.vllm_config):
@@ -476,6 +519,7 @@ class ElasticEPScalingExecutor:
             expert_weights=model.expert_weights[0],
         )
 
+        timer.start("torch_compile")
         if (
             self.worker.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
