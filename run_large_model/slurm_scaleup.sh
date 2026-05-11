@@ -28,7 +28,7 @@ Scale-up benchmark  |  job=${SLURM_JOB_ID}  dp=${INITIAL_GPUS}->${TARGET_GPUS}
 head=${HEAD} (${HEAD_IP})  redundant=${REDUNDANT}->${SCALE_REDUNDANT}
 prompts=${PROMPTS}  concurrency=${CONCURRENCY}
 run_dir=${RUN_DIR}
-============================================================
+============================================================ 
 EOF
 
 export SCRIPT_DIR HEAD_IP RAY_PORT RPC_PORT RUN_DIR SIGNAL_FILE
