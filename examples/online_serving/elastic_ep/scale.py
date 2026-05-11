@@ -20,7 +20,7 @@ def scale(host, port, new_dp_size, num_redundant_experts=None):
     print(f"Payload: {json.dumps(payload, indent=2)}")
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=300)
+        response = requests.post(url, json=payload, headers=headers, timeout=600)
 
         print(f"Status Code: {response.status_code}")
         print(f"Response: {response.text}")
