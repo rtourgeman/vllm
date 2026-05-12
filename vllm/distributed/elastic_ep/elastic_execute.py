@@ -479,7 +479,13 @@ class ElasticEPScalingExecutor:
         multi_block_table.clear()
 
         unlock_workspace()
-        self.worker.compile_or_warm_up_model()
+        if new_dp_size < old_dp_size:
+            old_enforce_eager = self.worker.model_config.enforce_eager
+            self.worker.model_config.enforce_eager = True
+            self.worker.compile_or_warm_up_model()
+            self.worker.model_config.enforce_eager = old_enforce_eager
+        else:
+            self.worker.compile_or_warm_up_model()
         lock_workspace()
 
         for bt, (saved_gpu, saved_cpu) in zip(
