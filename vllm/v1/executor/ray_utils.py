@@ -64,8 +64,7 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
-            # CUDA stream used by Ray Compiled DAG model execution. Runtime
-            # dummy batches should use the same stream to preserve ordering.
+            # CUDA stream used by Ray Compiled DAG model execution.
             self.compiled_dag_cuda_stream: torch.cuda.Stream | None = None
 
         rpc_rank: int
@@ -93,13 +92,22 @@ try:
                 logger.exception(msg)
                 raise e
 
-        def execute_dummy_batch(self):
+        def _run_on_dag_stream(self, fn, *args, **kwargs):
+            """Run *fn* on the compiled DAG CUDA stream, if captured."""
             assert self.worker is not None
             if self.compiled_dag_cuda_stream is not None:
                 current_platform.set_device(self.worker.device)
                 with torch.cuda.stream(self.compiled_dag_cuda_stream):
-                    return self.worker.execute_dummy_batch()
-            return self.worker.execute_dummy_batch()
+                    return fn(*args, **kwargs)
+            return fn(*args, **kwargs)
+
+        def execute_dummy_batch(self):
+            return self._run_on_dag_stream(self.worker.execute_dummy_batch)
+
+        def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
+            return self._run_on_dag_stream(
+                self.worker.elastic_ep_execute,
+                execute_method, *args, **kwargs)
 
         def get_node_ip(self) -> str:
             return get_ip()
