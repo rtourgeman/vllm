@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -371,18 +372,34 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert NixlEPAll2AllManager._buffer is None, (
             "NIXL EP buffer already initialized"
         )
+        t0 = time.perf_counter()
         buffer = Buffer(
             rank=self.rank,
             tcp_store_group=self.tcp_store_group.store,
             timeout_ms=100000,
         )
+        t_create = (time.perf_counter() - t0) * 1000
+
+        t0 = time.perf_counter()
         buffer.update_memory_buffers(
             num_ranks=self.max_num_ep_ranks,
             num_experts_per_rank=num_experts_per_rank,
             num_rdma_bytes=num_rdma_bytes,
         )
+        t_update = (time.perf_counter() - t0) * 1000
+
         ranks_to_connect = list(range(self.world_size))
+        t0 = time.perf_counter()
         buffer.connect_ranks(ranks_to_connect)
+        t_connect = (time.perf_counter() - t0) * 1000
+
+        logger.info(
+            "[Elastic EP Timer] NIXL-EP _init_buffer (ep_rank=%d): "
+            "create=%.2fms, update_memory=%.2fms, "
+            "connect_ranks(%s)=%.2fms",
+            self.rank, t_create, t_update,
+            ranks_to_connect, t_connect)
+
         NixlEPAll2AllManager._buffer = _NixlEPBufferState(
             buffer=buffer,
             connected_ep_size=self.world_size,
@@ -397,7 +414,14 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
         state.buffer.set_tcp_store_group(self.tcp_store_group.store)
         ranks_to_connect = list(range(state.connected_ep_size, ep_size))
+        t0 = time.perf_counter()
         state.buffer.connect_ranks(ranks_to_connect, activate=activate)
+        t_connect = (time.perf_counter() - t0) * 1000
+        logger.info(
+            "[Elastic EP Timer] NIXL-EP connect_ranks (ep_rank=%d): "
+            "ranks=%s, %.2fms",
+            self.rank, ranks_to_connect, t_connect)
+
         state.connected_ep_size = ep_size
         if activate:
             state.active_ep_size = ep_size
