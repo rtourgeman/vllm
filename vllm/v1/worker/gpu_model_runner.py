@@ -6337,6 +6337,8 @@ class GPUModelRunner(
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
+        logger.info("[Elastic EP] capture_model: model_type=%s, capture_count=%d", type(self.model).__name__, compilation_counter.num_gpu_runner_capture_triggers)
+
         start_time = time.perf_counter()
 
         # Trigger CUDA graph capture for specific shapes.

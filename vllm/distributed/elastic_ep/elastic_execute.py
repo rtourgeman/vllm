@@ -325,13 +325,22 @@ class ElasticEPScalingExecutor:
         self._staged_moe_quant_methods.clear()
 
     def _release_cuda_graphs(self) -> None:
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+        from vllm.platforms import current_platform
+
         if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
             wrapper = self.worker.model_runner.model
             wrapper.concrete_cudagraph_entries = {}
 
         elif isinstance(self.worker.model_runner.model, UBatchWrapper):
             wrapper = self.worker.model_runner.model
-            wrapper.clear_graphs()
+            for cg_meta in wrapper.cudagraphs.values():
+                cg_meta.outputs = None
+                cg_meta.cudagraph = None
+            wrapper.cudagraphs = {}
+
+        CUDAGraphWrapper.clear_all_graphs()
+        BreakableCUDAGraphWrapper.clear_all_graphs()
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
@@ -340,6 +349,19 @@ class ElasticEPScalingExecutor:
         gc.collect()
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
+
+        new_pool = current_platform.graph_pool_handle()
+        current_platform.__class__._global_graph_pool = new_pool
+        for inst in list(CUDAGraphWrapper._all_instances):
+            inst.graph_pool = new_pool
+        for inst in list(BreakableCUDAGraphWrapper._all_instances):
+            inst.graph_pool = new_pool
+        if isinstance(self.worker.model_runner.model, UBatchWrapper):
+            wrapper = self.worker.model_runner.model
+            if wrapper.cudagraph_wrapper is not None:
+                wrapper.cudagraph_wrapper.graph_pool = new_pool
+
+        logger.info("[Elastic EP] _release_cuda_graphs complete (new graph pool)")
 
     def switch_and_remove(self) -> None:
         self._release_cuda_graphs()
