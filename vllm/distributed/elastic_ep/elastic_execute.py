@@ -44,6 +44,7 @@ from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -343,17 +344,16 @@ class ElasticEPScalingExecutor:
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
 
-        # After destroying all CUDAGraph objects the allocator can leave
-        # stale state on the old pool, causing "use_count > 0 INTERNAL
-        # ASSERT FAILED" on re-capture. A fresh pool avoids this.
-        # reset_compile_wrapper recreates inner CUDAGraphWrappers that
-        # pick up the new pool automatically, but UBatchWrapper's own
-        # cudagraph_wrapper survives the reset and must be updated.
-        new_pool = current_platform.graph_pool_handle()
-        current_platform.__class__._global_graph_pool = new_pool
-        model = self.worker.model_runner.model
-        if isinstance(model, UBatchWrapper) and model.cudagraph_wrapper:
-            model.cudagraph_wrapper.graph_pool = new_pool
+        # DBO (UBatchWrapper) captures multi-stream FULL CUDA graphs
+        # whose pool state becomes invalid after graph destruction.
+        # Allocate a fresh pool before re-capture to avoid
+        # "use_count > 0 INTERNAL ASSERT FAILED" from the allocator.
+        if isinstance(self.worker.model_runner.model, UBatchWrapper):
+            new_pool = current_platform.graph_pool_handle()
+            current_platform.__class__._global_graph_pool = new_pool
+            wrapper = self.worker.model_runner.model
+            if wrapper.cudagraph_wrapper is not None:
+                wrapper.cudagraph_wrapper.graph_pool = new_pool
 
     def switch_and_remove(self) -> None:
         self._release_cuda_graphs()
