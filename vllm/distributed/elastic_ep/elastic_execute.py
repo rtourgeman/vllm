@@ -325,7 +325,6 @@ class ElasticEPScalingExecutor:
         self._staged_moe_quant_methods.clear()
 
     def _release_cuda_graphs(self) -> None:
-        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
         from vllm.platforms import current_platform
 
         if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
@@ -334,13 +333,7 @@ class ElasticEPScalingExecutor:
 
         elif isinstance(self.worker.model_runner.model, UBatchWrapper):
             wrapper = self.worker.model_runner.model
-            for cg_meta in wrapper.cudagraphs.values():
-                cg_meta.outputs = None
-                cg_meta.cudagraph = None
-            wrapper.cudagraphs = {}
-
-        CUDAGraphWrapper.clear_all_graphs()
-        BreakableCUDAGraphWrapper.clear_all_graphs()
+            wrapper.clear_graphs()
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
@@ -350,18 +343,17 @@ class ElasticEPScalingExecutor:
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
 
+        # After destroying all CUDAGraph objects the allocator can leave
+        # stale state on the old pool, causing "use_count > 0 INTERNAL
+        # ASSERT FAILED" on re-capture. A fresh pool avoids this.
+        # reset_compile_wrapper recreates inner CUDAGraphWrappers that
+        # pick up the new pool automatically, but UBatchWrapper's own
+        # cudagraph_wrapper survives the reset and must be updated.
         new_pool = current_platform.graph_pool_handle()
         current_platform.__class__._global_graph_pool = new_pool
-        for inst in list(CUDAGraphWrapper._all_instances):
-            inst.graph_pool = new_pool
-        for inst in list(BreakableCUDAGraphWrapper._all_instances):
-            inst.graph_pool = new_pool
-        if isinstance(self.worker.model_runner.model, UBatchWrapper):
-            wrapper = self.worker.model_runner.model
-            if wrapper.cudagraph_wrapper is not None:
-                wrapper.cudagraph_wrapper.graph_pool = new_pool
-
-        logger.info("[Elastic EP] _release_cuda_graphs complete (new graph pool)")
+        model = self.worker.model_runner.model
+        if isinstance(model, UBatchWrapper) and model.cudagraph_wrapper:
+            model.cudagraph_wrapper.graph_pool = new_pool
 
     def switch_and_remove(self) -> None:
         self._release_cuda_graphs()
