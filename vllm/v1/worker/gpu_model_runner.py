@@ -6422,11 +6422,17 @@ class GPUModelRunner(
                 runtime_mode,
                 batch_descs,
             ) in self.cudagraph_dispatcher.get_capture_descs():
+                _cg_t0 = time.perf_counter()
                 self._capture_cudagraphs(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
                 )
                 torch.accelerator.synchronize()
+                _cg_elapsed = (time.perf_counter() - _cg_t0) * 1000
+                logger.info(
+                    "[Elastic EP Timer] CUDA graph capture "
+                    "(mode=%s, num_graphs=%d): %.2fms",
+                    runtime_mode.name, len(batch_descs), _cg_elapsed)
 
             # Capture encoder CUDA graphs if enabled
             if self.encoder_cudagraph_manager is not None:
