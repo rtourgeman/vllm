@@ -4,6 +4,7 @@
 
 import gc
 import os
+import time as _time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -599,18 +600,31 @@ class Worker(WorkerBase):
                     warmup_sizes.append(compile_range.end)
 
         # We skip EPLB here since we don't want to record dummy metrics
+        _t0 = _time.perf_counter()
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
+        _t_compile = (_time.perf_counter() - _t0) * 1000
 
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
+        _t0 = _time.perf_counter()
         kernel_warmup(self)
+        _t_kernel = (_time.perf_counter() - _t0) * 1000
 
+        _t0 = _time.perf_counter()
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+        _t_cudagraph = (_time.perf_counter() - _t0) * 1000
+
+        logger.info(
+            "[Elastic EP Timer] compile_or_warm_up_model breakdown: "
+            "compile_warmup=%.2fms, kernel_warmup=%.2fms, "
+            "cuda_graph_capture=%.2fms, total=%.2fms",
+            _t_compile, _t_kernel, _t_cudagraph,
+            _t_compile + _t_kernel + _t_cudagraph)
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -700,6 +714,7 @@ class Worker(WorkerBase):
             )
 
             # We skip EPLB here since we don't want to record dummy metrics
+            _t0 = _time.perf_counter()
             hidden_states, last_hidden_states = self.model_runner._dummy_run(
                 num_tokens=max_num_reqs,
                 skip_eplb=True,
@@ -709,6 +724,10 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+            _t_dummy = (_time.perf_counter() - _t0) * 1000
+            logger.info(
+                "[Elastic EP Timer] dummy_run + sampler warmup "
+                "(num_tokens=%d): %.2fms", max_num_reqs, _t_dummy)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
