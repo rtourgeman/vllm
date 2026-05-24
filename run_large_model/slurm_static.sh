@@ -25,7 +25,7 @@ HEAD_IP="$(srun --nodes=1 --ntasks=1 --overlap -w "${HEAD}" \
 cat <<EOF
 ============================================================
 Static benchmark  |  job=${SLURM_JOB_ID}  dp=${DP_SIZE}  redundant=${REDUNDANT}
-head=${HEAD} (${HEAD_IP})  prompts=${PROMPTS}  concurrency=${CONCURRENCY}
+head=${HEAD} (${HEAD_IP})
 run_dir=${RUN_DIR}
 ============================================================
 EOF
