@@ -12,7 +12,7 @@ CONTAINER_MOUNTS="${MOUNT_SRC}:${MOUNT_DST},${SCRIPT_DIR}:${SCRIPT_DIR}"
 NUM_NODES="${SLURM_JOB_NUM_NODES}"
 RAY_PORT=$((6379 + SLURM_JOB_ID % 1000))
 RPC_PORT=$((9876 + SLURM_JOB_ID % 1000))
-RUN_DIR="${SCRIPT_DIR}/logs/c${CONCURRENCY}_${INITIAL_GPUS}to${TARGET_GPUS}gpu_r${SCALE_REDUNDANT}_id${SLURM_JOB_ID}"
+RUN_DIR="${SCRIPT_DIR}/logs/${INITIAL_GPUS}to${TARGET_GPUS}gpu_r${SCALE_REDUNDANT}_id${SLURM_JOB_ID}"
 SIGNAL_FILE="${RUN_DIR}/join_now.signal"
 mkdir -p "${RUN_DIR}"
 
@@ -26,13 +26,12 @@ cat <<EOF
 ============================================================
 Scale-up benchmark  |  job=${SLURM_JOB_ID}  dp=${INITIAL_GPUS}->${TARGET_GPUS}
 head=${HEAD} (${HEAD_IP})  redundant=${REDUNDANT}->${SCALE_REDUNDANT}
-prompts=${PROMPTS}  concurrency=${CONCURRENCY}
 run_dir=${RUN_DIR}
-============================================================ 
+============================================================
 EOF
 
 export SCRIPT_DIR HEAD_IP RAY_PORT RPC_PORT RUN_DIR SIGNAL_FILE MODEL_NAME
-export INITIAL_GPUS INITIAL_NODES TARGET_GPUS REDUNDANT SCALE_REDUNDANT PROMPTS CONCURRENCY
+export INITIAL_GPUS INITIAL_NODES TARGET_GPUS REDUNDANT SCALE_REDUNDANT
 
 srun --nodes="${NUM_NODES}" --ntasks-per-node=1 \
     --container-image="${CONTAINER_IMAGE}" \
@@ -113,19 +112,24 @@ if [[ "${my_node}" == "'"${HEAD}"'" ]]; then
     echo "[${my_node}] scale-up completed in $((scale_end - scale_start))s"
     sleep 30
 
-    # Warmup
-    echo "[${my_node}] running warmup benchmark"
-    NUM_PROMPTS=1000 MAX_CONCURRENCY=256 \
-    BENCH_HOST=localhost WAIT_FOR_SERVER=false \
-    BENCH_LOG_FILE="${RUN_DIR}/bench_warmup_np1000_c256_i1024_o1024.log" \
-        bash "${SCRIPT_DIR}/bench.sh"
+    tag="${INITIAL_GPUS}to${TARGET_GPUS}gpu"
+    run_suite() {
+        local t="${1}"
+        # warmup — no concurrency limit
+        echo "[${my_node}] warmup: 8192 prompts, unlimited concurrency"
+        NUM_PROMPTS=8192 MAX_CONCURRENCY=0 BENCH_HOST=localhost WAIT_FOR_SERVER=false \
+        BENCH_LOG_FILE="${RUN_DIR}/bench_${t}_warmup_np8192.log" \
+            bash "${SCRIPT_DIR}/bench.sh"
 
-    # Real benchmark
-    echo "[${my_node}] running real benchmark (${TARGET_GPUS} GPUs)"
-    NUM_PROMPTS="${PROMPTS}" MAX_CONCURRENCY="${CONCURRENCY}" \
-    BENCH_HOST=localhost WAIT_FOR_SERVER=false \
-    BENCH_LOG_FILE="${RUN_DIR}/bench_${INITIAL_GPUS}to${TARGET_GPUS}gpu_np${PROMPTS}_c${CONCURRENCY}_i1024_o1024.log" \
-        bash "${SCRIPT_DIR}/bench.sh"
+        for spec in "8192:1024" "4096:512" "2048:256" "1024:128" "512:64"; do
+            np="${spec%%:*}"; cc="${spec##*:}"
+            echo "[${my_node}] bench: np=${np} concurrency=${cc}"
+            NUM_PROMPTS="${np}" MAX_CONCURRENCY="${cc}" BENCH_HOST=localhost WAIT_FOR_SERVER=false \
+            BENCH_LOG_FILE="${RUN_DIR}/bench_${t}_np${np}_c${cc}.log" \
+                bash "${SCRIPT_DIR}/bench.sh"
+        done
+    }
+    run_suite "${tag}"
 
     echo "[${my_node}] done, shutting down"
     kill "${vllm_pid}" 2>&1 || true; sleep 3; kill -9 "${vllm_pid}" 2>&1 || true

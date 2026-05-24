@@ -17,15 +17,19 @@ cmd=(
     --random-input-len "${RANDOM_INPUT_LEN}"
     --random-output-len "${RANDOM_OUTPUT_LEN}"
     --num-prompts "${NUM_PROMPTS}"
-    --max-concurrency "${MAX_CONCURRENCY}"
 )
+
+# Only add --max-concurrency when a positive value is given.
+# Leave it out for warmup runs where MAX_CONCURRENCY=0 means "no limit".
+[[ -n "${MAX_CONCURRENCY:-}" && "${MAX_CONCURRENCY}" != "0" ]] && \
+    cmd+=(--max-concurrency "${MAX_CONCURRENCY}")
 
 if [[ "${WAIT_FOR_SERVER}" == "true" ]]; then
     wait_for_health "${HOST}" "${PORT}" "${SERVER_WAIT_TIMEOUT}"
 fi
 
 printf 'Running benchmark: prompts=%s concurrency=%s input=%s output=%s\n' \
-    "${NUM_PROMPTS}" "${MAX_CONCURRENCY}" "${RANDOM_INPUT_LEN}" "${RANDOM_OUTPUT_LEN}"
+    "${NUM_PROMPTS}" "${MAX_CONCURRENCY:-unlimited}" "${RANDOM_INPUT_LEN}" "${RANDOM_OUTPUT_LEN}"
 
 if [[ -n "${BENCH_LOG_FILE}" ]]; then
     mkdir -p "$(dirname "${BENCH_LOG_FILE}")"
@@ -37,4 +41,3 @@ if [[ -n "${BENCH_LOG_FILE}" ]]; then
 else
     exec "${cmd[@]}"
 fi
-
