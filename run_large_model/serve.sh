@@ -34,6 +34,8 @@ cmd=(
     --data-parallel-start-rank "${DATA_PARALLEL_START_RANK}"
     --api-server-count "${API_SERVER_COUNT}"
     --all2all-backend "${ALL2ALL_BACKEND}"
+    --kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'
+    --compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 )
 
 if [[ "${ENABLE_ELASTIC_EP}" == "true" ]]; then
