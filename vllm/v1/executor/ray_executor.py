@@ -120,6 +120,18 @@ class RayDistributedExecutor(Executor):
                 ray.kill(worker)
             self.forward_dag = None
 
+    def teardown_comm_dag(self) -> None:
+        """Tear down the compiled DAG so it is rebuilt on next execution.
+
+        After elastic scale-down, the model is recompiled on the main actor
+        thread's stream.  The old DAG background thread holds a stale stream
+        context; rebuilding the DAG creates a fresh thread whose stream is
+        compatible with the recompiled model.
+        """
+        if self.forward_dag is not None:
+            self.forward_dag.teardown()
+            self.forward_dag = None
+
     def _configure_ray_workers_use_nsight(self, ray_remote_kwargs) -> dict[str, Any]:
         # If nsight profiling is enabled, we need to set the profiling
         # configuration for the ray workers as runtime env.

@@ -1831,6 +1831,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 if self.eep_scaling_state.is_complete():
                     if self.eep_scaling_state.worker_type == "removing":
                         raise SystemExit
+                    if hasattr(self.model_executor, "teardown_comm_dag"):
+                        self.model_executor.teardown_comm_dag()
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
 
