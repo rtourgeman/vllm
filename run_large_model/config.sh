@@ -6,6 +6,7 @@ SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
 # Container
 #IMAGE="${IMAGE:-/lustre/fsw/portfolios/network/users/rtourgeman/latest_rebase_20_4_26_v9.sqsh}"
+#IMAGE="${IMAGE:-/lustre/fsw/portfolios/network/users/rtourgeman/large_model_timing_v2.sqsh}"
 IMAGE="${IMAGE:-/lustre/fsw/portfolios/network/users/rtourgeman/large_model.sqsh}"
 MOUNT_SRC="${MOUNT_SRC:-/lustre/fsw/portfolios/network/users/rtourgeman}"
 MOUNT_DST="${MOUNT_DST:-/rtourgeman}"
