@@ -51,15 +51,17 @@ class ScaleUpNewEngineState(enum.IntEnum):
 
 class ScaleDownRemainingEngineState(enum.IntEnum):
     PREPARE = 0
-    EPLB_RESHUFFLE = 1
-    SWITCH_AND_PREPARE = 2
-    COMPLETE = 3
+    DRAIN_GPU = 1
+    EPLB_RESHUFFLE = 2
+    SWITCH_AND_PREPARE = 3
+    COMPLETE = 4
 
 
 class ScaleDownRemovingEngineState(enum.IntEnum):
     PREPARE = 0
-    EPLB_RESHUFFLE = 1
-    COMPLETE = 2
+    DRAIN_GPU = 1
+    EPLB_RESHUFFLE = 2
+    COMPLETE = 3
 
 
 EngineState: TypeAlias = (
@@ -365,6 +367,16 @@ class ElasticEPScalingState:
         assert self.old_dp_group is not None and self.old_dp_store is not None
 
         if state == ScaleDownRemainingEngineState.PREPARE:
+            self.state = ScaleDownRemainingEngineState.DRAIN_GPU
+            self._drain_gpu_deadline = time.monotonic() + 0.1
+            return True
+
+        elif state == ScaleDownRemainingEngineState.DRAIN_GPU:
+            # Wait briefly so any in-flight CUDA graph replay on the DAG
+            # thread's stream completes before the heavy reconfigure block
+            # launches EP kernels on the main thread's stream.
+            if time.monotonic() < self._drain_gpu_deadline:
+                return False
             self.state = ScaleDownRemainingEngineState.EPLB_RESHUFFLE
             self.old_dp_store.add("eep_barrier_engine_count", 1)
             return True
@@ -405,6 +417,13 @@ class ElasticEPScalingState:
         assert self.old_dp_group is not None and self.old_dp_store is not None
 
         if state == ScaleDownRemovingEngineState.PREPARE:
+            self.state = ScaleDownRemovingEngineState.DRAIN_GPU
+            self._drain_gpu_deadline = time.monotonic() + 0.1
+            return True
+
+        if state == ScaleDownRemovingEngineState.DRAIN_GPU:
+            if time.monotonic() < self._drain_gpu_deadline:
+                return False
             self.state = ScaleDownRemovingEngineState.EPLB_RESHUFFLE
             self.old_dp_store.add("eep_barrier_engine_count", 1)
             return True
