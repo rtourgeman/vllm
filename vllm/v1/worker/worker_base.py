@@ -91,8 +91,19 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
-    def compile_or_warm_up_model(self) -> CompilationTimes:
+    def compile_or_warm_up_model(
+        self,
+        *,
+        skip_kernel_warmup: bool = False,
+        skip_flashinfer_autotune: bool = False,
+    ) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
+
+        Args:
+            skip_kernel_warmup: Skip model execution kernel warmup while still
+                running any required compilation and CUDA graph capture.
+            skip_flashinfer_autotune: Skip FlashInfer autotune benchmarking
+                while preserving the warmup dummy run.
 
         Returns:
             Compilation times (language_model, encoder) in seconds.

@@ -567,7 +567,17 @@ class ElasticEPScalingExecutor:
 
         timer.start("compile_or_warm_up_model")
         unlock_workspace()
-        self.worker.compile_or_warm_up_model()
+        skip_flashinfer_autotune = new_dp_size > old_dp_size
+        logger.info(
+            "[Elastic EP] compile_or_warm_up_model options: "
+            "old_dp_size=%d, new_dp_size=%d, skip_flashinfer_autotune=%s",
+            old_dp_size,
+            new_dp_size,
+            skip_flashinfer_autotune,
+        )
+        self.worker.compile_or_warm_up_model(
+            skip_flashinfer_autotune=skip_flashinfer_autotune
+        )
         lock_workspace()
 
         timer.start("restore_block_tables")

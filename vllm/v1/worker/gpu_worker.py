@@ -550,7 +550,12 @@ class Worker(WorkerBase):
             self.model_runner._init_kv_zero_meta()
 
     @instrument(span_name="Warmup (GPU)")
-    def compile_or_warm_up_model(self) -> CompilationTimes:
+    def compile_or_warm_up_model(
+        self,
+        *,
+        skip_kernel_warmup: bool = False,
+        skip_flashinfer_autotune: bool = False,
+    ) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -587,8 +592,15 @@ class Worker(WorkerBase):
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         _t0 = _time.perf_counter()
-        kernel_warmup(self)
-        _t_kernel = (_time.perf_counter() - _t0) * 1000
+        if skip_kernel_warmup:
+            logger.info("Skipping kernel warmup before CUDA graph capture.")
+            _t_kernel = 0.0
+        else:
+            kernel_warmup(
+                self,
+                skip_flashinfer_autotune=skip_flashinfer_autotune,
+            )
+            _t_kernel = (_time.perf_counter() - _t0) * 1000
 
         _t0 = _time.perf_counter()
         cuda_graph_memory_bytes = 0
@@ -596,12 +608,16 @@ class Worker(WorkerBase):
             cuda_graph_memory_bytes = self.model_runner.capture_model()
         _t_cudagraph = (_time.perf_counter() - _t0) * 1000
 
+        kernel_warmup_time = "skipped" if skip_kernel_warmup else f"{_t_kernel:.2f}ms"
         logger.info(
             "[Elastic EP Timer] compile_or_warm_up_model breakdown: "
-            "compile_warmup=%.2fms, kernel_warmup=%.2fms, "
+            "compile_warmup=%.2fms, kernel_warmup=%s, "
             "cuda_graph_capture=%.2fms, total=%.2fms",
-            _t_compile, _t_kernel, _t_cudagraph,
-            _t_compile + _t_kernel + _t_cudagraph)
+            _t_compile,
+            kernel_warmup_time,
+            _t_cudagraph,
+            _t_compile + _t_kernel + _t_cudagraph,
+        )
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (

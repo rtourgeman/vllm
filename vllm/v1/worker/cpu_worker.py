@@ -209,7 +209,12 @@ class CPUWorker(Worker):
 
         return kv_cache_size
 
-    def compile_or_warm_up_model(self) -> CompilationTimes:
+    def compile_or_warm_up_model(
+        self,
+        *,
+        skip_kernel_warmup: bool = False,
+        skip_flashinfer_autotune: bool = False,
+    ) -> CompilationTimes:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
