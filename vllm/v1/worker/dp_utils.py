@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
+
 import torch
 import torch.distributed as dist
 
@@ -48,7 +50,22 @@ def _run_ar(
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = cudagraph_mode
+    start_time = time.perf_counter()
     dist.all_reduce(tensor, group=group)
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+    if elapsed_ms > 1000:
+        logger.info(
+            "[Elastic EP Timer] DP coordinate all_reduce: %.2fms "
+            "(dp_rank=%d/%d, tokens=%d, padded_tokens=%d, "
+            "cudagraph_mode=%d, should_ubatch=%s)",
+            elapsed_ms,
+            dp_rank,
+            dp_size,
+            orig_num_tokens_per_ubatch,
+            padded_num_tokens_per_ubatch,
+            cudagraph_mode,
+            should_ubatch,
+        )
     return tensor
 
 
