@@ -52,6 +52,51 @@ def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
     return output_dir / "autotune_configs.json"
 
 
+def _is_flashinfer_backend(backend: object) -> bool:
+    try:
+        return backend.get_name() == "FLASHINFER"  # type: ignore[attr-defined]
+    except AttributeError:
+        backend_name = getattr(backend, "value", str(backend))
+        return "flashinfer" in backend_name.lower()
+    except NotImplementedError:
+        return False
+
+
+def _uses_flashinfer_autotune_kernels(runner: "GPUModelRunner") -> bool:
+    """Return whether the loaded model selected FlashInfer MoE kernels."""
+    model = runner.get_model()
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if quant_method is None:
+            continue
+
+        for backend_attr in (
+            "unquantized_backend",
+            "nvfp4_backend",
+            "mxfp4_backend",
+            "fp8_backend",
+            "kernel_backend",
+        ):
+            backend = getattr(quant_method, backend_attr, None)
+            if backend is not None and _is_flashinfer_backend(backend):
+                return True
+
+        old_quant_method = getattr(quant_method, "old_quant_method", None)
+        if old_quant_method is not None:
+            for backend_attr in (
+                "unquantized_backend",
+                "nvfp4_backend",
+                "mxfp4_backend",
+                "fp8_backend",
+                "kernel_backend",
+            ):
+                old_backend = getattr(old_quant_method, backend_attr, None)
+                if old_backend is not None and _is_flashinfer_backend(old_backend):
+                    return True
+
+    return False
+
+
 def kernel_warmup(worker: "Worker"):
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
@@ -70,18 +115,17 @@ def kernel_warmup(worker: "Worker"):
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
     if enable_flashinfer_autotune is False:
         logger.info("Skipping FlashInfer autotune because it is disabled.")
+    elif not _uses_flashinfer_autotune_kernels(worker.model_runner):
+        logger.info(
+            "Skipping FlashInfer autotune because no FlashInfer MoE "
+            "backend is active."
+        )
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
     # and is not a pooling model
-    def _is_flashinfer_backend(backend):
-        try:
-            return backend.get_name() == "FLASHINFER"
-        except NotImplementedError:
-            return False
-
     if (
         not worker.model_runner.is_pooling_model
         and worker.model_runner.attn_groups
