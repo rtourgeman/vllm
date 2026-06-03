@@ -3312,6 +3312,7 @@ class GPUModelRunner(
         self,
         expanded_physical_to_logical: torch.Tensor,
         old_num_physical_experts: int,
+        num_eplb_replicas: int | None = None,
     ) -> None:
         assert self._moe_model is not None
 
@@ -3322,6 +3323,7 @@ class GPUModelRunner(
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
             num_valid_physical_experts=old_num_physical_experts,
+            num_eplb_replicas=num_eplb_replicas,
         )
 
     def _pool(

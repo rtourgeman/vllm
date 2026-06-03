@@ -8,6 +8,7 @@ import threading
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn.functional as F
 from torch.distributed import ProcessGroup
 
 from vllm.distributed.parallel_state import get_eplb_group
@@ -62,6 +63,20 @@ def run_rebalance_experts(
     # Move the global expert load window to CPU for computation.
     with torch.cuda.stream(cuda_stream):
         global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
+
+    old_phy_map = physical_to_logical_map_cpu
+    num_total_physical = physical_to_logical_map_cpu.shape[1]
+    has_inactive_slots = num_total_physical > eplb_stats.num_replicas
+    if has_inactive_slots:
+        ep_size = eplb_stats.num_gpus
+        local_active = eplb_stats.num_replicas // ep_size
+        local_total = num_total_physical // ep_size
+        old_phy_map = physical_to_logical_map_cpu.reshape(
+            -1, ep_size, local_total
+        )[:, :, :local_active].reshape(
+            -1, eplb_stats.num_replicas
+        ).contiguous()
+
     # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
         global_expert_load_window,
@@ -69,8 +84,15 @@ def run_rebalance_experts(
         eplb_stats.num_groups,
         eplb_stats.num_nodes,
         eplb_stats.num_gpus,
-        physical_to_logical_map_cpu,
+        old_phy_map,
     )
+    if has_inactive_slots:
+        new_physical_to_logical_map = F.pad(
+            new_physical_to_logical_map.reshape(
+                -1, ep_size, local_active),
+            (0, local_total - local_active),
+            value=-1,
+        ).reshape(-1, num_total_physical)
     assert new_physical_to_logical_map.device == torch.device("cpu")
 
     return new_physical_to_logical_map
