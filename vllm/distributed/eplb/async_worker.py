@@ -8,7 +8,7 @@ import threading
 from typing import TYPE_CHECKING
 
 import torch
-from torch.distributed import ProcessGroup
+import torch.nn.functional as F
 
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
@@ -26,8 +26,7 @@ def start_async_worker(
     state: "EplbState",
     is_profile: bool = False,
 ) -> threading.Thread:
-    eplb_group = get_eplb_group().device_group
-    rank = eplb_group.rank()
+    rank = get_eplb_group().device_group.rank()
     device_index = state.cuda_device_index
     assert state.is_async
 
@@ -38,7 +37,6 @@ def start_async_worker(
         try:
             transfer_run_periodically(
                 state=state,
-                eplb_group=eplb_group,
                 cuda_stream=cuda_stream,
                 is_profile=is_profile,
             )
@@ -78,13 +76,17 @@ def run_rebalance_experts(
 
 def transfer_run_periodically(
     state: "EplbState",
-    eplb_group: ProcessGroup,
     cuda_stream: torch.cuda.Stream,
     is_profile: bool = False,
 ) -> None:
     while True:
         state.rearrange_event.wait(stream=cuda_stream)
         logger.info("async worker woke up for EPLB transfer")
+
+        # Re-fetch the EPLB group on every wakeup. Elastic scaling replaces
+        # the active EPLB group, so a group captured when the worker started
+        # would be stale (wrong EP size) after a scale transition.
+        eplb_group = get_eplb_group().device_group
 
         assert state.is_async
         for model_state in state.model_states.values():
