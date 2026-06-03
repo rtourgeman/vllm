@@ -734,6 +734,7 @@ class EplbState:
         eplb_model_state = next(iter(self.model_states.values()))
         model = eplb_model_state.model
         num_total_physical = model.num_physical_experts
+        num_output_physical = num_total_physical
         num_replicas = (
             self.num_eplb_replicas
             if self.num_eplb_replicas is not None
@@ -750,9 +751,12 @@ class EplbState:
             tcp_store_group = coordinator.tcp_store_group
             num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
             num_gpus = sum(new_rank != -1 for new_rank in rank_mapping.values())
-            num_replicas = (
-                num_total_physical // ep_group.size() * num_gpus
-            )
+            num_output_physical = num_total_physical // ep_group.size() * num_gpus
+            cap = self.num_eplb_replicas
+            if cap is not None and cap <= num_output_physical and cap % num_gpus == 0:
+                num_replicas = cap
+            else:
+                num_replicas = num_output_physical
         else:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
@@ -773,21 +777,24 @@ class EplbState:
         ):
             if not self.is_async or is_profile:
                 old_phy_map = eplb_model_state.physical_to_logical_map.cpu()
-                has_inactive_slots = (
-                    num_total_physical > num_replicas
-                    and rank_mapping is None
-                )
+                has_inactive_slots = num_output_physical > num_replicas
                 if has_inactive_slots:
-                    ep_size = ep_group.size()
+                    ep_size = num_gpus
                     local_active = num_replicas // ep_size
-                    local_total = num_total_physical // ep_size
-                    # Extract active prefix from each rank's
-                    # [active..., inactive -1...] layout.
-                    old_phy_map = old_phy_map.reshape(
-                        -1, ep_size, local_total
-                    )[:, :, :local_active].reshape(
-                        -1, num_replicas
-                    ).contiguous()
+                    local_total = num_output_physical // ep_size
+                    if rank_mapping is None:
+                        # Extract active prefix from each rank's
+                        # [active..., inactive -1...] layout.
+                        old_phy_map = old_phy_map.reshape(
+                            -1, ep_size, local_total
+                        )[:, :, :local_active].reshape(
+                            -1, num_replicas
+                        ).contiguous()
+                    else:
+                        # During scale-down, active slots per rank can grow after
+                        # removing ranks, so old per-rank slots no longer align
+                        # with the capped target layout.
+                        old_phy_map = None
 
                 new_physical_to_logical_map = self.policy.rebalance_experts(
                     global_expert_load_window.cpu(),
@@ -804,7 +811,7 @@ class EplbState:
                             -1, ep_size, local_active),
                         (0, local_total - local_active),
                         value=-1,
-                    ).reshape(-1, num_total_physical)
+                    ).reshape(-1, num_output_physical)
 
                 # Update expert weights
                 rearrange_expert_weights_inplace(
