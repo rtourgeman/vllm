@@ -144,7 +144,21 @@ def transfer_run_periodically(
                 # Block this thread until the main thread and main stream
                 # finish copying model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
+                logger.warning(
+                    "[EPLB NCCL DEBUG] async worker PARKED thread=%s layer=%d/%d "
+                    "comm_id=%s comm_group_started=%s waiting for main thread",
+                    threading.get_ident(),
+                    layer_idx,
+                    num_layers,
+                    id(model_state.communicator),
+                    getattr(model_state.communicator, "_group_started", None),
+                )
                 consumed_event.wait(stream=cuda_stream)
+                logger.warning(
+                    "[EPLB NCCL DEBUG] async worker RESUMED thread=%s layer=%d",
+                    threading.get_ident(),
+                    layer_idx,
+                )
                 logger.debug("Layer %d transfer complete", layer_idx)
                 assert model_state.pending_result is None
                 layer_idx += 1

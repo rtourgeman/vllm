@@ -5,6 +5,7 @@ EPLB communicator implementations and factory.
 """
 
 import contextlib
+import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -584,8 +585,20 @@ class PyNcclEplbCommunicator(EplbCommunicator):
         self._group_started = False
         self._log_initialized()
 
+    def _world_size(self) -> int:
+        return self._pynccl_comm.world_size
+
     def _ensure_group_started(self) -> None:
         if not self._group_started:
+            logger.warning(
+                "[EPLB NCCL DEBUG] group_start comm_id=%s thread=%s rank=%d "
+                "world_size=%d stream=%s",
+                id(self),
+                threading.get_ident(),
+                self._pynccl_comm.rank,
+                self._world_size(),
+                id(self._cuda_stream),
+            )
             self._pynccl_comm.group_start()
             self._group_started = True
 
@@ -596,6 +609,15 @@ class PyNcclEplbCommunicator(EplbCommunicator):
         expert_id: int,  # unused by this backend
     ) -> None:
         self._ensure_group_started()
+        if not (0 <= dst_rank < self._world_size()):
+            logger.warning(
+                "[EPLB NCCL DEBUG] INVALID send dst_rank=%d world_size=%d "
+                "comm_id=%s thread=%s",
+                dst_rank,
+                self._world_size(),
+                id(self),
+                threading.get_ident(),
+            )
         for tensor in tensors:
             self._pynccl_comm.send(tensor, dst_rank, stream=self._cuda_stream)
 
@@ -606,10 +628,28 @@ class PyNcclEplbCommunicator(EplbCommunicator):
         expert_id: int,  # unused by this backend
     ) -> None:
         self._ensure_group_started()
+        if not (0 <= src_rank < self._world_size()):
+            logger.warning(
+                "[EPLB NCCL DEBUG] INVALID recv src_rank=%d world_size=%d "
+                "comm_id=%s thread=%s",
+                src_rank,
+                self._world_size(),
+                id(self),
+                threading.get_ident(),
+            )
         for tensor in tensors:
             self._pynccl_comm.recv(tensor, src_rank, stream=self._cuda_stream)
 
     def execute(self) -> None:
+        logger.warning(
+            "[EPLB NCCL DEBUG] group_end comm_id=%s thread=%s rank=%d "
+            "group_started=%s stream=%s",
+            id(self),
+            threading.get_ident(),
+            self._pynccl_comm.rank,
+            self._group_started,
+            id(self._cuda_stream),
+        )
         if self._group_started:
             self._pynccl_comm.group_end()
             self._group_started = False

@@ -526,6 +526,25 @@ class ElasticEPScalingExecutor:
 
         model_config = self.worker.model_runner.model_config
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+
+        import threading as _threading
+
+        for _hash, _ms in eplb_state.model_states.items():
+            _comm = _ms.communicator
+            logger.warning(
+                "[EPLB NCCL DEBUG] reshuffle entry thread=%s is_async=%s "
+                "rebalanced=%s pending_result=%s comm_id=%s "
+                "comm_group_started=%s comm_stream=%s rank_mapping=%s",
+                _threading.get_ident(),
+                eplb_state.is_async,
+                getattr(_ms, "rebalanced", None),
+                getattr(_ms, "pending_result", None) is not None,
+                id(_comm),
+                getattr(_comm, "_group_started", None),
+                id(getattr(_comm, "_cuda_stream", None)),
+                "set" if rank_mapping is not None else "none",
+            )
+
         is_async_enabled = eplb_state.is_async
         eplb_state.is_async = False
         if rank_mapping is None:
