@@ -490,6 +490,25 @@ def transfer_layer(
     num_physical_experts = old_layer_indices.shape[0]
     assert len(expert_weights[0]) >= 1
     num_local_physical_experts = expert_weights[0].shape[0]
+    from vllm.distributed.parallel_state import get_eplb_group
+
+    live_ep_size = get_eplb_group().device_group.size()
+    logger.warning(
+        "[EPLB transfer_layer DEBUG] ep_rank=%d passed_ep_size=%d "
+        "live_ep_size=%d num_physical_experts(map)=%d "
+        "num_local_physical_experts(weights)=%d "
+        "expected(ep_size*num_local)=%d rank_mapping=%s "
+        "old_shape=%s new_shape=%s",
+        ep_group.rank(),
+        ep_size,
+        live_ep_size,
+        num_physical_experts,
+        num_local_physical_experts,
+        ep_size * num_local_physical_experts,
+        "set" if rank_mapping is not None else "none",
+        tuple(old_layer_indices.shape),
+        tuple(new_layer_indices.shape),
+    )
     assert num_physical_experts == ep_size * num_local_physical_experts
 
     old_layer_indices_np = old_layer_indices.cpu().numpy()
