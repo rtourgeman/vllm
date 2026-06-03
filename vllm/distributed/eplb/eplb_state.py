@@ -59,6 +59,54 @@ from .rebalance_execute import (
 logger = init_logger(__name__)
 
 
+def _log_physical_to_logical_map(
+    model_state: "EplbModelState",
+    physical_to_logical_map: torch.Tensor,
+    *,
+    layer: int | None = None,
+) -> None:
+    ep_group = get_ep_group()
+    if ep_group.rank != 0:
+        return
+
+    if layer is None:
+        layer = 0
+        layer_map = physical_to_logical_map[layer]
+        source = "sync"
+    else:
+        # Async EPLB commits one layer at a time. Layer 0 is enough to
+        # identify every rearrangement without logging every MoE layer.
+        if layer != 0:
+            return
+        layer_map = physical_to_logical_map
+        source = "async"
+
+    layer_map_list = layer_map.detach().cpu().tolist()
+    num_physical = len(layer_map_list)
+    ep_size = ep_group.world_size
+
+    logger.info(
+        "[EPLB Rearrange] Committed physical_to_logical_map "
+        "for model %s layer %d (%s):",
+        model_state.model_name,
+        layer,
+        source,
+    )
+    if ep_size <= 0 or num_physical % ep_size != 0:
+        logger.info("[EPLB Rearrange] %s", layer_map_list)
+        return
+
+    slots_per_rank = num_physical // ep_size
+    for rank in range(ep_size):
+        start = rank * slots_per_rank
+        end = start + slots_per_rank
+        logger.info(
+            "[EPLB Rearrange] RANK%d: %s",
+            rank,
+            layer_map_list[start:end],
+        )
+
+
 @dataclass
 class EplbStats:
     """
@@ -1150,6 +1198,7 @@ def _commit_eplb_maps_for_layer(
         f"experts {src.shape[0]}."
     )
     dst.copy_(src, non_blocking=True)
+    _log_physical_to_logical_map(model_state, src, layer=layer)
 
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
@@ -1188,6 +1237,7 @@ def _commit_eplb_maps(
         model_state.physical_to_logical_map = src.to(dst.device)
     else:
         dst.copy_(src, non_blocking=True)
+    _log_physical_to_logical_map(model_state, src)
 
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
