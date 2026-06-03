@@ -111,6 +111,19 @@ class AsyncLLM(EngineClient):
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
 
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.enable_eplb:
+            num_logical = vllm_config.model_config.get_num_experts()
+            config_redundant = parallel_config.eplb_config.num_redundant_experts
+            self._num_eplb_replicas: int = num_logical + config_redundant
+            self._total_physical_slots: int = num_logical + config_redundant
+        else:
+            # Not used when EPLB is disabled; the config enforces
+            # enable_eplb=True for elastic EP, so scale/redundancy
+            # APIs never read this value.
+            self._num_eplb_replicas: int = 0
+            self._total_physical_slots: int = 0
+
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
         if tracing_endpoint is not None:
             init_tracer("vllm.llm_engine", tracing_endpoint)
@@ -992,7 +1005,10 @@ class AsyncLLM(EngineClient):
         )
 
     async def scale_elastic_ep(
-        self, new_data_parallel_size: int, drain_timeout: int = 300
+        self,
+        new_data_parallel_size: int,
+        drain_timeout: int = 300,
+        num_redundant_experts: int | None = None,
     ):
         """
         Scale up or down the data parallel size by adding or removing
@@ -1001,7 +1017,12 @@ class AsyncLLM(EngineClient):
             new_data_parallel_size: The new number of data parallel workers
             drain_timeout:
                 Maximum time to wait for requests to drain (seconds)
+            num_redundant_experts:
+                If set, override the EPLB redundant expert count after
+                scale-up.  Rejected with HTTP 400 if not valid.
         """
+        from vllm.v1.engine.utils import closest_valid_redundancy
+
         old_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if old_data_parallel_size == new_data_parallel_size:
             logger.info(
@@ -1009,6 +1030,66 @@ class AsyncLLM(EngineClient):
                 new_data_parallel_size,
             )
             return
+
+        parallel_config = self.vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        new_ep_size = new_data_parallel_size * tp_size
+        old_ep_size = old_data_parallel_size * tp_size
+        num_logical = self.vllm_config.model_config.get_num_experts()
+        current_total = self._total_physical_slots
+        is_scale_up = new_data_parallel_size > old_data_parallel_size
+
+        if num_redundant_experts is not None and not is_scale_up:
+            raise ValueError(
+                "num_redundant_experts is only supported during scale-up."
+            )
+
+        per_gpu = current_total // old_ep_size
+        new_total = per_gpu * new_ep_size
+
+        if num_redundant_experts is not None:
+            desired_active = num_logical + num_redundant_experts
+            if (
+                desired_active % new_ep_size != 0
+                or desired_active > new_total
+            ):
+                suggestion = closest_valid_redundancy(
+                    num_redundant_experts, num_logical,
+                    new_ep_size, new_total,
+                )
+                raise ValueError(
+                    f"Cannot use {num_redundant_experts} redundant experts "
+                    f"with EP size {new_ep_size}: "
+                    f"(num_logical={num_logical} + "
+                    f"num_redundant={num_redundant_experts}) = "
+                    f"{desired_active} is not valid. "
+                    f"Closest valid num_redundant_experts: {suggestion}"
+                )
+            effective_cap = desired_active
+        else:
+            cap = self._num_eplb_replicas
+            if cap % new_ep_size == 0 and cap <= new_total:
+                effective_cap = cap
+            elif is_scale_up:
+                current_redundant = cap - num_logical
+                suggestion = closest_valid_redundancy(
+                    current_redundant, num_logical, new_ep_size, new_total,
+                )
+                raise ValueError(
+                    f"Cannot scale to EP size {new_ep_size}: current EPLB "
+                    f"cap ({cap} active experts = {num_logical} logical + "
+                    f"{current_redundant} redundant) is not compatible with "
+                    f"the new EP size. Closest valid "
+                    f"num_redundant_experts: {suggestion}. "
+                    f"Set num_redundant_experts explicitly in the scale request."
+                )
+            else:
+                effective_cap = new_total
+                logger.info(
+                    "Scale-down: EPLB cap %d incompatible with EP size %d, "
+                    "resetting to full capacity %d",
+                    cap, new_ep_size, new_total,
+                )
 
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
             logger.info(
@@ -1034,12 +1115,28 @@ class AsyncLLM(EngineClient):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
 
+        if num_redundant_experts is None and effective_cap < new_total:
+            num_redundant_experts = effective_cap - num_logical
+
         set_scaling_elastic_ep(True)
         try:
-            await self.engine_core.scale_elastic_ep(new_data_parallel_size)
-            self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
+            await self.engine_core.scale_elastic_ep(
+                new_data_parallel_size,
+                num_redundant_experts=num_redundant_experts,
+            )
+            self.vllm_config.parallel_config.data_parallel_size = (
+                new_data_parallel_size
+            )
+            self._num_eplb_replicas = effective_cap
+            self._total_physical_slots = new_total
         finally:
             set_scaling_elastic_ep(False)
+
+        return {
+            "message": (
+                f"Scaled to {new_data_parallel_size} data parallel engines"
+            ),
+        }
 
     @property
     def is_running(self) -> bool:

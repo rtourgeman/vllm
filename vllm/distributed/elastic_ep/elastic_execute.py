@@ -276,10 +276,11 @@ class ElasticEPScalingExecutor:
         num_local_physical_experts = num_physical_experts // get_ep_group().world_size
         num_logical_experts = eplb_model_state.logical_replica_count.shape[1]
 
-        new_ep_size = standby_ep_group.world_size
-        old_num_physical = eplb_model_state.expert_load_pass.shape[1]
-        desired = eplb_state.num_eplb_replicas or old_num_physical
-        num_eplb_replicas = desired if desired % new_ep_size == 0 else None
+        reconfig = self.reconfig_request
+        if reconfig is not None and reconfig.num_redundant_experts is not None:
+            num_eplb_replicas = num_logical_experts + reconfig.num_redundant_experts
+        else:
+            num_eplb_replicas = eplb_state.num_eplb_replicas
 
         broadcast_expert_mapping(
             physical_to_logical=physical_to_logical,
@@ -459,11 +460,11 @@ class ElasticEPScalingExecutor:
             eplb_model_state.expert_load_pass = expanded_expert_load_pass
             eplb_model_state.expert_load_window = expanded_expert_load_window
             eplb_state.num_valid_physical_experts = old_num_physical_experts
-            desired = eplb_state.num_eplb_replicas or old_num_physical_experts
-            if desired % new_ep_size == 0:
-                eplb_state.num_eplb_replicas = desired
-            else:
-                eplb_state.num_eplb_replicas = None
+            reconfig = self.reconfig_request
+            if reconfig is not None and reconfig.num_redundant_experts is not None:
+                eplb_state.num_eplb_replicas = (
+                    num_logical_experts + reconfig.num_redundant_experts
+                )
         else:
             assert pad_size < 0
             eplb_model_state.expert_load_pass = eplb_model_state.expert_load_pass[

@@ -205,7 +205,11 @@ class EngineCoreClient(ABC):
         running state."""
         raise NotImplementedError
 
-    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def scale_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        num_redundant_experts: int | None = None,
+    ) -> None:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -1511,7 +1515,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     ) -> None:
         await self._send_input(EngineCoreRequestType.ABORT, request_ids, engine)
 
-    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def scale_elastic_ep(
+        self,
+        new_data_parallel_size: int,
+        num_redundant_experts: int | None = None,
+    ) -> None:
         """Scale elastic EP data parallel size"""
         cur_data_parallel_size = len(self.core_engines)
 
@@ -1528,7 +1536,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         if scale_up:
             await self._scale_up_elastic_ep(
-                cur_data_parallel_size, new_data_parallel_size
+                cur_data_parallel_size,
+                new_data_parallel_size,
+                num_redundant_experts=num_redundant_experts,
             )
         else:
             await self._scale_down_elastic_ep(
@@ -1572,7 +1582,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         return ip, store.port
 
     async def _scale_up_elastic_ep(
-        self, cur_data_parallel_size: int, new_data_parallel_size: int
+        self,
+        cur_data_parallel_size: int,
+        new_data_parallel_size: int,
+        num_redundant_experts: int | None = None,
     ) -> None:
         """Scale up the data parallel size by creating new engine cores
         and reconfiguring existing ones."""
@@ -1598,6 +1611,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 new_data_parallel_master_port=parallel_config.data_parallel_master_port,
                 new_data_parallel_master_port_list=parallel_config._data_parallel_master_port_list,
                 coord_store_port=coord_store_port,
+                num_redundant_experts=num_redundant_experts,
             )
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
