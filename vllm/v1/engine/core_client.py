@@ -212,6 +212,9 @@ class EngineCoreClient(ABC):
     ) -> None:
         raise NotImplementedError
 
+    async def set_redundant_experts(self, num_redundant: int) -> None:
+        raise NotImplementedError
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
@@ -1738,4 +1741,17 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size,
+        )
+
+    async def set_redundant_experts(self, num_redundant: int) -> None:
+        futures = []
+        for engine in self.core_engines:
+            coro = self._call_utility_async(
+                "set_redundant_experts", num_redundant, engine=engine
+            )
+            futures.append(asyncio.create_task(coro))
+        await asyncio.gather(*futures)
+        logger.info(
+            "[Elastic EP] Set redundant experts to %d on all engines",
+            num_redundant,
         )

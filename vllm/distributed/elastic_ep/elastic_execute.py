@@ -574,6 +574,15 @@ class ElasticEPScalingExecutor:
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
+    def set_redundant_experts(self, num_redundant: int) -> None:
+        eplb_state = self.worker.model_runner.eplb_state
+        assert eplb_state is not None
+        model_config = self.worker.model_runner.model_config
+        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        num_logical = eplb_model_state.logical_replica_count.shape[1]
+        eplb_state.num_eplb_replicas = num_logical + num_redundant
+        self._perform_eplb_reshuffle()
+
     def perform_eplb_reshuffle(self) -> None:
         self._perform_eplb_reshuffle()
         self._set_eplb_suppressed(False)

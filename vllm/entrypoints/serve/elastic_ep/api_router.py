@@ -94,6 +94,60 @@ async def scale_elastic_ep(raw_request: Request):
     finally:
         set_scaling_elastic_ep(False)
 
+
+@router.post(
+    "/set_redundant_experts",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"model": dict},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.CONFLICT.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+async def set_redundant_experts(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e
+
+    num_redundant = body.get("num_redundant_experts")
+
+    if num_redundant is None:
+        raise HTTPException(
+            status_code=400, detail="num_redundant_experts is required"
+        )
+
+    if not isinstance(num_redundant, int) or num_redundant < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="num_redundant_experts must be a non-negative integer",
+        )
+
+    if get_scaling_elastic_ep():
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot change redundant experts while elastic EP "
+            "scaling is in progress",
+        )
+
+    client = engine_client(raw_request)
+    try:
+        await client.set_redundant_experts(num_redundant)
+        return JSONResponse(
+            {"message": f"Set redundant experts to {num_redundant}"}
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        logger.error("Set redundant experts failed: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Set redundant experts failed"
+        ) from e
+
+
 @router.post("/is_scaling_elastic_ep")
 async def is_scaling_elastic_ep(raw_request: Request):
     return JSONResponse({"is_scaling_elastic_ep": get_scaling_elastic_ep()})

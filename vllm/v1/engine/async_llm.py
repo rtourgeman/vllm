@@ -1138,6 +1138,45 @@ class AsyncLLM(EngineClient):
             ),
         }
 
+    async def set_redundant_experts(self, num_redundant: int) -> None:
+        """Set the number of redundant experts and trigger EPLB reshuffle."""
+        from vllm.v1.engine.utils import closest_valid_redundancy
+
+        if not self.vllm_config.parallel_config.enable_eplb:
+            raise ValueError(
+                "set_redundant_experts requires EPLB to be enabled."
+            )
+
+        if num_redundant < 0:
+            raise ValueError("num_redundant_experts must be >= 0")
+
+        parallel_config = self.vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        ep_size = parallel_config.data_parallel_size * tp_size
+        num_logical = self.vllm_config.model_config.get_num_experts()
+        total_slots = self._total_physical_slots
+        new_active = num_logical + num_redundant
+
+        if new_active > total_slots or new_active % ep_size != 0:
+            suggestion = closest_valid_redundancy(
+                num_redundant, num_logical, ep_size, total_slots,
+            )
+            reason = (
+                f"exceeds total slots {total_slots}"
+                if new_active > total_slots
+                else f"is not divisible by EP size {ep_size}"
+            )
+            raise ValueError(
+                f"Cannot set {num_redundant} redundant experts: "
+                f"(num_logical={num_logical} + "
+                f"num_redundant={num_redundant}) = {new_active} "
+                f"{reason}. "
+                f"Closest valid num_redundant_experts: {suggestion}"
+            )
+
+        await self.engine_core.set_redundant_experts(num_redundant)
+        self._num_eplb_replicas = new_active
+
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.
