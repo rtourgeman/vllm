@@ -60,6 +60,18 @@ class CpuGpuEvent:
         self._event.record(stream)
         self._recorded.set()
 
+    def release_if_waiting(self, stream: torch.cuda.Stream | None = None) -> None:
+        """
+        Force-unblock a waiter without requiring the normal producer to have
+        recorded first. Used to abandon an in-flight async transfer during an
+        elastic reshuffle. No-op if the event is already recorded.
+        """
+        if self._recorded.is_set():
+            return
+        self._event = torch.cuda.Event()
+        self._event.record(stream)
+        self._recorded.set()
+
 
 def override_envs_for_eplb(
     parallel_config: ParallelConfig,

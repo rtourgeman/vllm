@@ -266,6 +266,19 @@ class EplbState:
         """
         Background thread handling async transfers.
         """
+        self.async_quiesce_event: threading.Event = threading.Event()
+        """
+        Set by the main thread to ask the async worker to stand down before an
+        elastic reshuffle. The async worker shares ``communicator`` with the
+        main thread; both must not drive it concurrently.
+        """
+        self.async_idle_event: threading.Event = threading.Event()
+        self.async_idle_event.set()
+        """
+        Set by the async worker whenever it is parked at the top of its loop
+        with no in-flight rearrange (group closed, no pending result). The
+        main thread waits on this during quiescence.
+        """
         self.cuda_device_index: int | None = None
         """
         CUDA device index for the async EPLB worker thread.
@@ -820,6 +833,42 @@ class EplbState:
                 self,
                 is_profile=is_profile,
             )
+
+    def quiesce_async_worker(self) -> None:
+        """Stop the async EPLB worker and wait until it is idle.
+
+        Must be called on the worker process's main thread before an elastic
+        reshuffle, which drives ``communicator`` (and the underlying NCCL
+        communicator) from the main thread. The async worker uses the same
+        communicator instance, so it must not be mid-transfer (NCCL group
+        open) or holding a pending result when the main thread takes over.
+        Any in-flight async rearrange is abandoned; the elastic reshuffle
+        recomputes the mapping from scratch.
+        """
+        if not self.is_async or self.async_worker is None:
+            return
+
+        self.async_quiesce_event.set()
+        # Poll: release a parked worker (waiting on the main thread to consume
+        # a layer) so it can observe the quiesce flag, then re-check idle. The
+        # loop handles the race where the worker parks after our first release.
+        while not self.async_idle_event.wait(timeout=0.05):
+            for model_state in self.model_states.values():
+                result = model_state.pending_result
+                if result is not None:
+                    model_state.pending_result = None
+                    result.consumed_event.release_if_waiting()
+
+        # Worker is idle now; reset shared state it leaves behind.
+        for model_state in self.model_states.values():
+            model_state.rebalanced = False
+            model_state.communicator.set_stream(None)
+
+    def resume_async_worker(self) -> None:
+        """Allow the async EPLB worker to run again after an elastic reshuffle."""
+        if not self.is_async or self.async_worker is None:
+            return
+        self.async_quiesce_event.clear()
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()

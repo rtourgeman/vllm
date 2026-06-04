@@ -80,8 +80,19 @@ def transfer_run_periodically(
     is_profile: bool = False,
 ) -> None:
     while True:
+        # Signal idle before blocking so the main thread can quiesce us safely.
+        state.async_idle_event.set()
         state.rearrange_event.wait(stream=cuda_stream)
+        state.async_idle_event.clear()
         logger.info("async worker woke up for EPLB transfer")
+
+        # An elastic reshuffle is taking over the shared communicator; abandon
+        # any signalled rearrange and return to idle without touching NCCL.
+        if state.async_quiesce_event.is_set():
+            for model_state in state.model_states.values():
+                model_state.rebalanced = False
+                model_state.pending_result = None
+            continue
 
         # Re-fetch the EPLB group on every wakeup. Elastic scaling replaces
         # the active EPLB group, so a group captured when the worker started
@@ -113,6 +124,13 @@ def transfer_run_periodically(
             # model_state.expert_buffer, which will be consumed by the main thread in
             # move_to_workspace
             while model_state.rebalanced and layer_idx < num_layers:
+                # Stop touching the shared communicator if the main thread is
+                # about to run an elastic reshuffle. Abandon the in-flight
+                # rearrange; it will be recomputed after the transition.
+                if state.async_quiesce_event.is_set():
+                    model_state.rebalanced = False
+                    model_state.pending_result = None
+                    break
                 transfer_metadata = transfer_layer(
                     old_layer_indices=physical_to_logical_map_cpu[layer_idx],
                     new_layer_indices=new_physical_to_logical_map[layer_idx],

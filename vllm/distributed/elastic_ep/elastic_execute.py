@@ -527,13 +527,19 @@ class ElasticEPScalingExecutor:
         model_config = self.worker.model_runner.model_config
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
 
+        # Stop the async EPLB worker before driving the shared communicator
+        # from this (main) thread. Otherwise both threads issue NCCL group
+        # operations on the same communicator, which fails with
+        # "NCCL error: invalid usage".
+        eplb_state.quiesce_async_worker()
+
         import threading as _threading
 
         for _hash, _ms in eplb_state.model_states.items():
             _comm = _ms.communicator
             logger.warning(
-                "[EPLB NCCL DEBUG] reshuffle entry thread=%s is_async=%s "
-                "rebalanced=%s pending_result=%s comm_id=%s "
+                "[EPLB NCCL DEBUG] reshuffle entry (post-quiesce) thread=%s "
+                "is_async=%s rebalanced=%s pending_result=%s comm_id=%s "
                 "comm_group_started=%s comm_stream=%s rank_mapping=%s",
                 _threading.get_ident(),
                 eplb_state.is_async,
@@ -547,18 +553,21 @@ class ElasticEPScalingExecutor:
 
         is_async_enabled = eplb_state.is_async
         eplb_state.is_async = False
-        if rank_mapping is None:
-            eplb_state.rearrange()
-        else:
-            eplb_state.rearrange(rank_mapping=rank_mapping)
-        # NOTE(yongji): check whether we need to synchronize here
-        torch.accelerator.synchronize()
-        # reset expert_rearrangement_step to ensure all ranks are synchronized
-        eplb_state.expert_rearrangement_step = 0
-        eplb_state.num_valid_physical_experts = (
-            eplb_model_state.physical_to_logical_map.shape[1]
-        )
-        eplb_state.is_async = is_async_enabled
+        try:
+            if rank_mapping is None:
+                eplb_state.rearrange()
+            else:
+                eplb_state.rearrange(rank_mapping=rank_mapping)
+            # NOTE(yongji): check whether we need to synchronize here
+            torch.accelerator.synchronize()
+            # reset expert_rearrangement_step to ensure all ranks are synchronized
+            eplb_state.expert_rearrangement_step = 0
+            eplb_state.num_valid_physical_experts = (
+                eplb_model_state.physical_to_logical_map.shape[1]
+            )
+        finally:
+            eplb_state.is_async = is_async_enabled
+            eplb_state.resume_async_worker()
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
