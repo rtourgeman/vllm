@@ -7,6 +7,7 @@ happen during model execution.
 """
 
 import hashlib
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,16 +55,20 @@ def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 def kernel_warmup(worker: "Worker"):
     # Deep GEMM warmup
+    t_deep_gemm = 0.0
     do_deep_gemm_warmup = (
         envs.VLLM_USE_DEEP_GEMM
         and is_deep_gemm_supported()
         and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
+        t0 = time.perf_counter()
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
+        t_deep_gemm = (time.perf_counter() - t0) * 1000
 
+    t_fi_autotune = 0.0
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
     )
@@ -71,7 +76,9 @@ def kernel_warmup(worker: "Worker"):
     if enable_flashinfer_autotune is False:
         logger.info("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
+        t0 = time.perf_counter()
         flashinfer_autotune(worker.model_runner)
+        t_fi_autotune = (time.perf_counter() - t0) * 1000
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
@@ -97,6 +104,7 @@ def kernel_warmup(worker: "Worker"):
         logger.info("Warming up FlashInfer attention.")
         # Warmup with mixed batch containing both prefill and decode tokens
         # This is to warm up both prefill and decode attention kernels
+        t0 = time.perf_counter()
         worker.model_runner._dummy_run(
             num_tokens=16,
             skip_eplb=True,
@@ -104,6 +112,16 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
+        t_fi_attn = (time.perf_counter() - t0) * 1000
+    else:
+        t_fi_attn = 0.0
+
+    logger.info(
+        "[Elastic EP Timer] kernel_warmup breakdown: "
+        "deep_gemm=%.2fms, flashinfer_autotune=%.2fms, "
+        "flashinfer_attention=%.2fms, total=%.2fms",
+        t_deep_gemm, t_fi_autotune, t_fi_attn,
+        t_deep_gemm + t_fi_autotune + t_fi_attn)
 
 
 # TODO: remove once FlashInfer upstream fixes the persistent file cache
