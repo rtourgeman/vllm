@@ -545,6 +545,12 @@ class ElasticEPScalingExecutor:
                 "set" if rank_mapping is not None else "none",
             )
 
+        # Finish any in-flight async transfer before the synchronous reshuffle
+        # reuses the EPLB communicator on this (main) thread. Otherwise the
+        # async worker and the main thread drive the same NCCL communicator
+        # concurrently, corrupting it (NCCL "invalid usage" / "internal error").
+        eplb_state.drain_async_worker()
+
         is_async_enabled = eplb_state.is_async
         eplb_state.is_async = False
         if rank_mapping is None:

@@ -27,6 +27,7 @@ physical experts.
 """
 
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -820,6 +821,38 @@ class EplbState:
                 self,
                 is_profile=is_profile,
             )
+
+    def drain_async_worker(self) -> None:
+        """Block until the async worker finishes any in-flight rearrangement.
+
+        Reuses the same lockstep handshake as the steady-state consume loop
+        (``_all_ranks_result_ready`` + :func:`_move_to_workspace`) so every rank
+        consumes the same layer at the same time. This keeps the workers'
+        per-layer ``transfer_layer`` collectives synchronized, lets the in-flight
+        rearrangement finish, issues each worker's ``group_end`` (clearing the
+        open NCCL group) and returns it to parking on ``rearrange_event``.
+
+        Must be called before the EPLB communicator is reused from the main
+        thread (e.g. the synchronous elastic scale-down reshuffle); otherwise the
+        main thread and the async worker drive the same NCCL communicator
+        concurrently and corrupt it.
+
+        NOTE: consuming locally (without ``_all_ranks_result_ready``) would let a
+        rank release its worker to the next layer while peers lag, desyncing the
+        ``transfer_layer`` collectives and deadlocking.
+        """
+        if not self.is_async:
+            return
+        ep_rank = get_ep_group().device_group.rank()
+        while any(ms.rebalanced for ms in self.model_states.values()):
+            for model_state in self.model_states.values():
+                # rebalanced must remain consistent amongst all ranks otherwise
+                # the all_reduce in _all_ranks_result_ready will hang.
+                if model_state.rebalanced and self._all_ranks_result_ready(
+                    model_state
+                ):
+                    _move_to_workspace(model_state=model_state, ep_rank=ep_rank)
+            time.sleep(0.001)
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()
