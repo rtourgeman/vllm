@@ -87,6 +87,12 @@ def transfer_run_periodically(
         # the active EPLB group, so a group captured when the worker started
         # would be stale (wrong EP size) after a scale transition.
         eplb_group = get_eplb_group().device_group
+        logger.warning(
+            "[EPLB WORKER DEBUG] woke up thread=%s rank=%d ep_size=%d",
+            threading.get_ident(),
+            eplb_group.rank(),
+            eplb_group.size(),
+        )
 
         assert state.is_async
         for model_state in state.model_states.values():
@@ -113,6 +119,16 @@ def transfer_run_periodically(
             # model_state.expert_buffer, which will be consumed by the main thread in
             # move_to_workspace
             while model_state.rebalanced and layer_idx < num_layers:
+                logger.warning(
+                    "[EPLB WORKER DEBUG] pre-transfer thread=%s rank=%d "
+                    "layer=%d/%d ep_size=%d group_started=%s",
+                    threading.get_ident(),
+                    eplb_group.rank(),
+                    layer_idx,
+                    num_layers,
+                    eplb_group.size(),
+                    getattr(model_state.communicator, "_group_started", None),
+                )
                 transfer_metadata = transfer_layer(
                     old_layer_indices=physical_to_logical_map_cpu[layer_idx],
                     new_layer_indices=new_physical_to_logical_map[layer_idx],
@@ -125,9 +141,24 @@ def transfer_run_periodically(
                     layer_idx=layer_idx,
                 )
 
+                logger.warning(
+                    "[EPLB WORKER DEBUG] post-transfer thread=%s rank=%d "
+                    "layer=%d group_started=%s",
+                    threading.get_ident(),
+                    eplb_group.rank(),
+                    layer_idx,
+                    getattr(model_state.communicator, "_group_started", None),
+                )
+
                 # Wait until all writes to expert_buffer have finished before making the
                 # AsyncEplbLayerResult visible to the main thread.
                 cuda_stream.synchronize()
+                logger.warning(
+                    "[EPLB WORKER DEBUG] post-sync thread=%s rank=%d layer=%d",
+                    threading.get_ident(),
+                    eplb_group.rank(),
+                    layer_idx,
+                )
 
                 # This event guarantees that expert_buffer will not be overwritten by
                 # subsequent iterations of this loop until the main thread has consumed
@@ -162,3 +193,14 @@ def transfer_run_periodically(
                 logger.debug("Layer %d transfer complete", layer_idx)
                 assert model_state.pending_result is None
                 layer_idx += 1
+
+            logger.warning(
+                "[EPLB WORKER DEBUG] round-complete thread=%s rank=%d "
+                "layers_done=%d/%d rebalanced=%s group_started=%s",
+                threading.get_ident(),
+                eplb_group.rank(),
+                layer_idx,
+                num_layers,
+                model_state.rebalanced,
+                getattr(model_state.communicator, "_group_started", None),
+            )

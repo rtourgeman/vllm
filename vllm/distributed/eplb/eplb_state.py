@@ -806,6 +806,14 @@ class EplbState:
                 eplb_model_state.rebalanced = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
+            logger.warning(
+                "[EPLB WORKER DEBUG] trigger round rank=%d ep_size=%d "
+                "rearrangement_step=%d rank_mapping=%s",
+                ep_rank,
+                ep_group.size(),
+                self.expert_rearrangement_step,
+                "set" if rank_mapping is not None else "none",
+            )
             self.rearrange_event.record()
         return None
 
@@ -844,15 +852,70 @@ class EplbState:
         if not self.is_async:
             return
         ep_rank = get_ep_group().device_group.rank()
+
+        def _snapshot() -> str:
+            parts = []
+            for ms in self.model_states.values():
+                parts.append(
+                    "model=%s rebalanced=%s pending=%s(layer=%s) group_started=%s"
+                    % (
+                        ms.model_name,
+                        ms.rebalanced,
+                        ms.pending_result is not None,
+                        getattr(ms.pending_result, "layer_idx", None),
+                        getattr(ms.communicator, "_group_started", None),
+                    )
+                )
+            return " | ".join(parts)
+
+        logger.warning(
+            "[EPLB DRAIN DEBUG] enter rank=%d thread=%s %s",
+            ep_rank,
+            threading.get_ident(),
+            _snapshot(),
+        )
+        iteration = 0
+        consumed = 0
+        last_heartbeat = time.monotonic()
         while any(ms.rebalanced for ms in self.model_states.values()):
+            iteration += 1
             for model_state in self.model_states.values():
                 # rebalanced must remain consistent amongst all ranks otherwise
                 # the all_reduce in _all_ranks_result_ready will hang.
                 if model_state.rebalanced and self._all_ranks_result_ready(
                     model_state
                 ):
+                    layer = getattr(model_state.pending_result, "layer_idx", None)
                     _move_to_workspace(model_state=model_state, ep_rank=ep_rank)
+                    consumed += 1
+                    logger.warning(
+                        "[EPLB DRAIN DEBUG] consumed rank=%d iter=%d model=%s "
+                        "layer=%s rebalanced_after=%s group_started=%s",
+                        ep_rank,
+                        iteration,
+                        model_state.model_name,
+                        layer,
+                        model_state.rebalanced,
+                        getattr(model_state.communicator, "_group_started", None),
+                    )
+            now = time.monotonic()
+            if now - last_heartbeat >= 2.0:
+                last_heartbeat = now
+                logger.warning(
+                    "[EPLB DRAIN DEBUG] waiting rank=%d iter=%d consumed=%d %s",
+                    ep_rank,
+                    iteration,
+                    consumed,
+                    _snapshot(),
+                )
             time.sleep(0.001)
+        logger.warning(
+            "[EPLB DRAIN DEBUG] exit rank=%d iters=%d consumed_layers=%d %s",
+            ep_rank,
+            iteration,
+            consumed,
+            _snapshot(),
+        )
 
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()

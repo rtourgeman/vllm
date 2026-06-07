@@ -549,7 +549,17 @@ class ElasticEPScalingExecutor:
         # reuses the EPLB communicator on this (main) thread. Otherwise the
         # async worker and the main thread drive the same NCCL communicator
         # concurrently, corrupting it (NCCL "invalid usage" / "internal error").
+        logger.warning(
+            "[EPLB DRAIN DEBUG] calling drain_async_worker rank=%d rank_mapping=%s",
+            get_ep_group().rank,
+            "set" if rank_mapping is not None else "none",
+        )
         eplb_state.drain_async_worker()
+        logger.warning(
+            "[EPLB DRAIN DEBUG] drain_async_worker returned rank=%d, "
+            "starting synchronous reshuffle",
+            get_ep_group().rank,
+        )
 
         is_async_enabled = eplb_state.is_async
         eplb_state.is_async = False
