@@ -540,6 +540,8 @@ class ElasticEPScalingExecutor:
             eplb_model_state.physical_to_logical_map.shape[1]
         )
         eplb_state.is_async = is_async_enabled
+        eplb_state.start_async_loop()
+
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
