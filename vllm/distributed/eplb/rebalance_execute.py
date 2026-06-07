@@ -457,7 +457,7 @@ def transfer_layer(
         cuda_stream: CUDA stream for async copies (can be None for sync mode).
         rank_mapping: Optional rank mapping for elastic expert parallelism.
         layer_idx: Index of the MoE layer being transferred.
-
+ 
     Returns:
         TransferMetadata: Metadata needed for completing remote weight transfers,
             including is_unchanged and is_received_locally masks.
