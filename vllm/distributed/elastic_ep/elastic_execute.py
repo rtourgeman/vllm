@@ -575,6 +575,19 @@ class ElasticEPScalingExecutor:
             eplb_model_state.physical_to_logical_map.shape[1]
         )
         eplb_state.is_async = is_async_enabled
+
+        # Ranks added during an elastic scale-up load with dummy weights, so
+        # GPUModelRunner.load_model() skipped start_async_loop() for them and
+        # their async EPLB worker thread was never created. All ranks (existing
+        # and newly-added) run this reshuffle, and EPLB state + communicator are
+        # fully set up by now, so start the worker here. start_async_loop() is
+        # idempotent (no-op when the worker already exists), so existing ranks
+        # are unaffected. Without this, a later async rearrange deadlocks: the
+        # existing ranks enter the NCCL expert transfer while the newly-added
+        # ranks have no async worker thread to participate in the collective.
+        if eplb_state.is_async:
+            eplb_state.start_async_loop()
+
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
