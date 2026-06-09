@@ -80,6 +80,8 @@ def transfer_run_periodically(
 ) -> None:
     while True:
         state.rearrange_event.wait(stream=cuda_stream)
+        if state.async_worker_should_stop:
+            return
         logger.info("async worker woke up for EPLB transfer")
 
         eplb_group = get_eplb_group().device_group
@@ -136,6 +138,7 @@ def transfer_run_periodically(
                     transfer_metadata=transfer_metadata,
                     consumed_event=consumed_event,
                 )
+                model_state.result_ready.set()
 
                 # Block this thread until the main thread and main stream
                 # finish copying model_state.expert_buffer into
