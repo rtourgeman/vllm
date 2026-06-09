@@ -28,7 +28,7 @@ physical experts.
 
 import threading
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -205,6 +205,11 @@ class EplbModelState:
     pending_result relies on the GIL to synchronize access between the main thread and
     the async worker.
     """
+    result_ready: threading.Event = field(default_factory=threading.Event)
+    """
+    Set by the async worker when ``pending_result`` is published; cleared on
+    consume so ``stop_async_loop`` can wait on it instead of polling.
+    """
 
 
 class EplbState:
@@ -265,6 +270,11 @@ class EplbState:
         self.async_worker: threading.Thread | None = None
         """
         Background thread handling async transfers.
+        """
+        self.async_worker_should_stop: bool = False
+        """
+        Cooperative stop flag set by ``stop_async_loop`` so the worker exits its
+        loop at the next safe checkpoint and can be recreated cleanly.
         """
         self.cuda_device_index: int | None = None
         """
@@ -825,6 +835,58 @@ class EplbState:
                 is_profile=is_profile,
             )
 
+    def drain_async_worker(self, per_layer_timeout_s: float = 30.0) -> None:
+        """Consume any in-flight rearrangement so the worker finishes the
+        round and parks on rearrange_event. Fails closed if the worker has
+        exited (e.g. crashed) before the round completed, instead of looping
+        forever waiting for a result that will never arrive."""
+        ep_rank = get_ep_group().device_group.rank()
+        worker = self.async_worker
+        while any(ms.rebalanced for ms in self.model_states.values()):
+            for model_state in self.model_states.values():
+                # rebalanced must stay consistent across ranks, else the
+                # all_reduce in _all_ranks_result_ready hangs.
+                if not model_state.rebalanced:
+                    continue
+                if not model_state.result_ready.wait(timeout=per_layer_timeout_s):
+                    if worker is not None and not worker.is_alive():
+                        raise RuntimeError(
+                            "Async EPLB worker exited before its in-flight "
+                            "rearrangement was drained; cannot suppress EPLB."
+                        )
+                    logger.warning(
+                        "drain_async_worker: no layer result after %.1fs (rank %d)",
+                        per_layer_timeout_s,
+                        ep_rank,
+                    )
+                    continue
+                if self._all_ranks_result_ready(model_state):
+                    _move_to_workspace(model_state=model_state, ep_rank=ep_rank)
+
+    def stop_async_loop(self) -> None:
+        """
+        Drain the in-flight round, then stop and join the worker.
+        """
+        worker = self.async_worker
+        if worker is None:
+            return
+        self.drain_async_worker()
+        self.async_worker_should_stop = True
+        try:
+            self.rearrange_event.record()
+        except RuntimeError:
+            pass
+        worker.join(timeout=30.0)
+        if worker.is_alive():
+            # Fail closed: a live worker may still use the EPLB communicator /
+            # groups that the scaling path is about to close and rebuild.
+            raise RuntimeError(
+                "Async EPLB worker did not stop within timeout; aborting to "
+                "avoid recreating the communicator while it is still in use."
+            )
+        self.async_worker = None
+        self.async_worker_should_stop = False
+
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()
         has_result = int(model_state.pending_result is not None)
@@ -1180,4 +1242,5 @@ def _move_to_workspace(
 
     # Reset pending_result before unblocking the async worker
     model_state.pending_result = None
+    model_state.result_ready.clear()
     result.consumed_event.record()

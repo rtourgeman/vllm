@@ -161,6 +161,9 @@ class ElasticEPScalingExecutor:
 
     def _set_eplb_suppressed(self, suppressed: bool) -> None:
         self.worker.model_runner.eep_eplb_suppressed = suppressed
+        eplb_state = self.worker.model_runner.eplb_state
+        assert eplb_state is not None
+        eplb_state.stop_async_loop() if suppressed else eplb_state.start_async_loop()
         ep_group = get_standby_ep_group() or get_ep_group()
         if ep_group.rank == 0:
             logger.info(
