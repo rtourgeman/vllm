@@ -115,6 +115,15 @@ class ElasticEPScalingState:
                 if worker_type == "removing"
                 else ScaleDownRemainingEngineState.PREPARE
             )
+        # [EEP-DBG] instrumentation: track last-logged state to log transitions
+        self._dbg_last_state: EngineState | None = None
+
+    def _dbg_rank(self) -> int:
+        group = self.old_dp_group if self.worker_type != "new" else self.new_dp_group
+        try:
+            return group.rank() if group is not None else -1
+        except Exception:  # noqa: BLE001 - diagnostics only
+            return -1
 
     @property
     def model_executor(self) -> "Executor":
@@ -131,6 +140,16 @@ class ElasticEPScalingState:
         return engine_core
 
     def progress(self) -> bool:
+        # [EEP-DBG] log only on state transitions to keep output bounded.
+        if self.state != self._dbg_last_state:
+            logger.info(
+                "[EEP-DBG] rank=%s worker_type=%s scale_type=%s state=%s",
+                self._dbg_rank(),
+                self.worker_type,
+                self.scale_type,
+                getattr(self.state, "name", self.state),
+            )
+            self._dbg_last_state = self.state
         if self.scale_type == "scale_up":
             return (
                 self._progress_new_engine()
@@ -208,19 +227,41 @@ class ElasticEPScalingState:
         # TODO(yongji): figure out appropriate timeout for the barrier
         timeout = None if dp_store.check([sync_key]) else timedelta(seconds=5)
 
+        logger.info(
+            "[EEP-DBG] rank=%s barrier=%s ENTER use_new_group=%s timeout=%s",
+            group_rank,
+            barrier_name,
+            use_new_group,
+            "None" if timeout is None else timeout.total_seconds(),
+        )
         try:
             self._execute_tcp_store_barrier(
                 dp_store, group_rank, group_size, barrier_id, timeout=timeout
+            )
+            logger.info(
+                "[EEP-DBG] rank=%s barrier=%s TCP-store stage passed, "
+                "entering torch.distributed.barrier",
+                group_rank,
+                barrier_name,
             )
             torch.distributed.barrier(dp_group)
             if group_rank == 0:
                 dp_store.delete_key(sync_key)
                 for i in range(group_size):
                     dp_store.delete_key(f"arrival_{barrier_id}_{i}")
+            logger.info(
+                "[EEP-DBG] rank=%s barrier=%s SUCCESS", group_rank, barrier_name
+            )
             return True
         except _BarrierTimeoutError as e:
             if timeout is None:
                 raise RuntimeError("Unexpected timeout encountered") from e
+            logger.info(
+                "[EEP-DBG] rank=%s barrier=%s TIMEOUT (will do one more model "
+                "step and retry)",
+                group_rank,
+                barrier_name,
+            )
             dp_store.compare_set(sync_key, "", b"1")
             return False
 

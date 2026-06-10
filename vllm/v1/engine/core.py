@@ -1877,7 +1877,25 @@ class DPEngineCoreProc(EngineCoreProc):
             self._maybe_publish_request_counts()
 
             if self.eep_scaling_state is not None:
-                _ = self.eep_scaling_state.progress()
+                made_progress = self.eep_scaling_state.progress()
+                # [EEP-DBG] Show whether this engine is about to run a model
+                # forward step *while* scaling is active. If some ranks log
+                # this while others are parked in a scaling collective, the
+                # per-step DP all-reduce in coordinate_batch_across_dp will
+                # deadlock. Throttle: log on progress + every 100th spin.
+                self._dbg_scale_iter = getattr(self, "_dbg_scale_iter", 0) + 1
+                if made_progress or self._dbg_scale_iter % 100 == 0:
+                    logger.info(
+                        "[EEP-DBG] dp_rank=%s scaling active (iter=%s): "
+                        "made_progress=%s state=%s -> about to call "
+                        "_process_engine_step (model forward)",
+                        self.dp_rank,
+                        self._dbg_scale_iter,
+                        made_progress,
+                        getattr(self.eep_scaling_state.state, "name", None)
+                        if self.eep_scaling_state is not None
+                        else None,
+                    )
                 if self.eep_scaling_state.is_complete():
                     if self.eep_scaling_state.worker_type == "removing":
                         raise SystemExit
