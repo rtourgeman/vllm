@@ -473,6 +473,11 @@ class ElasticEPScalingExecutor:
         assert parallel_config.eplb_config.communicator is not None, (
             "EPLB communicator backend must be set by ParallelConfig"
         )
+        # Release the old communicator (e.g. NIXL agents/registered memory)
+        # before building the new-topology one. The worker is stopped here.
+        old_communicator = getattr(eplb_model_state, "communicator", None)
+        if old_communicator is not None:
+            old_communicator.close()
         eplb_model_state.communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=parallel_config.eplb_config.communicator,

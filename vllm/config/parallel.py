@@ -17,6 +17,7 @@ from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
+from vllm.distributed.nixl_utils import is_nixl_available
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
@@ -794,12 +795,16 @@ class ParallelConfig:
         if self.enable_elastic_ep:
             if not self.enable_eplb:
                 raise ValueError("Elastic EP is only supported with enable_eplb=True.")
-            if self.eplb_config.use_async:
+            # Stateless groups support only 'nixl' (sync+async) and 'pynccl'
+            # (sync only; NCCL is incompatible with async EPLB).
+            if self.eplb_config.communicator is None:
+                self.eplb_config.communicator = (
+                    "nixl" if is_nixl_available() else "pynccl"
+                )
+            if self.eplb_config.use_async and self.eplb_config.communicator != "nixl":
                 raise ValueError(
-                    "Elastic EP requires the pynccl communicator, which is "
-                    "incompatible with async EPLB due to NCCL multi-stream "
-                    "conflicts. Disable async EPLB (eplb_config.use_async=False) "
-                    "to use elastic EP."
+                    "Async EPLB with elastic EP requires the 'nixl' communicator. "
+                    "Install NIXL or set eplb_config.use_async=False."
                 )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
@@ -920,23 +925,15 @@ class ParallelConfig:
             )
 
         if self.enable_eplb and self.eplb_config.communicator is None:
-            if self.enable_elastic_ep:
-                # Elastic EP requires stateless mode
-                # (torch.distributed.batch_isend_irecv doesn't
-                # support stateless mode), so we use PyNCCL backend
-                self.eplb_config.communicator = "pynccl"
+            # Avoid torch_nccl: NCCL is fundamentally incompatible
+            # with async EPLB due to multi-stream conflicts, and
+            # batched isend/irecv hangs under high load.
+            # See https://github.com/pytorch/pytorch/issues/174288
+            # Prefer nixl when available; fall back to torch_gloo.
+            if is_nixl_available():
+                self.eplb_config.communicator = "nixl"
             else:
-                # Avoid torch_nccl: NCCL is fundamentally incompatible
-                # with async EPLB due to multi-stream conflicts, and
-                # batched isend/irecv hangs under high load.
-                # See https://github.com/pytorch/pytorch/issues/174288
-                # Prefer nixl when available; fall back to torch_gloo.
-                from vllm.distributed.nixl_utils import is_nixl_available
-
-                if is_nixl_available():
-                    self.eplb_config.communicator = "nixl"
-                else:
-                    self.eplb_config.communicator = "torch_gloo"
+                self.eplb_config.communicator = "torch_gloo"
 
     @property
     def use_ray(self) -> bool:
