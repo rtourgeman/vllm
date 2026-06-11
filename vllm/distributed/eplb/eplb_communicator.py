@@ -87,6 +87,9 @@ class EplbCommunicator(ABC):
         communication buffers."""
         return True
 
+    def close(self) -> None:  # noqa: B027
+        """Release persistent communication resources (default: no-op)."""
+
     def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
         self._cuda_stream = cuda_stream
 
@@ -302,10 +305,22 @@ class NixlEplbCommunicator(EplbCommunicator):
         ] = {}
 
         self._cuda_device_id = int(self._device.index or 0)
+        self._handshake_done = False
+        # Local (non-collective) registration is eager. The collective
+        # agent/send-meta exchange is deferred to the first transfer: in
+        # elastic EP the communicator is (re)created at different points per
+        # rank, so a collective in __init__ would deadlock.
         self._init_step("buffers", self._init_registered_buffers)
+        self._log_initialized()
+
+    def _ensure_handshake(self) -> None:
+        """Run the one-time collective handshake (remote agents + send meta),
+        deferred from __init__ so all ranks run it in lockstep on first use."""
+        if self._handshake_done:
+            return
         self._init_step("agents", self._init_remote_agents)
         self._init_step("send meta", self._exchange_remote_send_meta)
-        self._log_initialized()
+        self._handshake_done = True
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
@@ -339,6 +354,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         pass
 
     def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
+        self._ensure_handshake()
         # Pre-compute expert_id -> src_row mapping for every rank so that
         # add_recv can immediately issue NIXL READs.
         assert not self._xfer_entries, (
@@ -531,13 +547,10 @@ class NixlEplbCommunicator(EplbCommunicator):
         try:
             self._wait_for_all_transfers([x[2] for x in self._xfer_entries])
 
-            # Post-READ barrier.
-            # Correctness fence for zero-copy: prevents overwrite-while-
-            # remote-read race.
-            torch.distributed.monitored_barrier(
-                group=self._cpu_group,
-                timeout=timedelta(minutes=5),
-            )
+            # Post-read fence (zero-copy correctness). Plain barrier, not
+            # monitored_barrier: the latter needs the group in torch's global
+            # world map, which stateless elastic-EP groups are not in.
+            torch.distributed.barrier(group=self._cpu_group)
         finally:
             for local_h, remote_h, xfer_h in self._xfer_entries:
                 with contextlib.suppress(Exception):
@@ -550,7 +563,9 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._expert_to_src_row = None
             self._layer_idx = None
 
-    def __del__(self) -> None:
+    def close(self) -> None:
+        """Release NIXL handles, registered memory and remote agents.
+        Idempotent (also called from __del__)."""
         with contextlib.suppress(Exception):
             for local_h, remote_h, xfer_h in self._xfer_entries:
                 with contextlib.suppress(Exception):
@@ -559,6 +574,7 @@ class NixlEplbCommunicator(EplbCommunicator):
                     self._nixl_wrapper.release_dlist_handle(local_h)
                 with contextlib.suppress(Exception):
                     self._nixl_wrapper.release_dlist_handle(remote_h)
+            self._xfer_entries.clear()
         with contextlib.suppress(Exception):
             for descs in self._registered_descs:
                 with contextlib.suppress(Exception):
@@ -569,6 +585,9 @@ class NixlEplbCommunicator(EplbCommunicator):
                 with contextlib.suppress(Exception):
                     self._nixl_wrapper.remove_remote_agent(agent_name)
             self._remote_agents.clear()
+
+    def __del__(self) -> None:
+        self.close()
 
 
 class PyNcclEplbCommunicator(EplbCommunicator):
@@ -628,8 +647,8 @@ def create_eplb_communicator(
             device and CPU communication groups.
         backend: Communicator backend name (``"torch_nccl"``,
             ``"torch_gloo"``, ``"pynccl"``, or ``"nixl"``).
-            Stateless (elastic EP) groups only support ``"torch_nccl"``
-            and ``"pynccl"``; ``"torch_nccl"`` is silently promoted to
+            Stateless (elastic EP) groups support ``"torch_nccl"``, ``"pynccl"``
+            and ``"nixl"``; ``"torch_nccl"`` is silently promoted to
             ``"pynccl"`` in that case.  When tensors reside on CPU,
             ``"torch_gloo"`` or ``"torch_nccl"`` are used via the CPU
             process group.
@@ -686,18 +705,19 @@ def create_eplb_communicator(
 
     is_stateless = isinstance(group_coordinator, StatelessGroupCoordinator)
     if is_stateless:
-        if backend not in ("torch_nccl", "pynccl"):
+        if backend not in ("torch_nccl", "pynccl", "nixl"):
             raise ValueError(
-                f"Elastic EP requires 'torch_nccl' or 'pynccl' EPLB communicator "
-                f"(got '{backend}')."
+                f"Elastic EP requires 'torch_nccl', 'pynccl' or 'nixl' EPLB "
+                f"communicator (got '{backend}')."
             )
         if backend == "torch_nccl":
             logger.warning(
-                "Stateless elastic EP requires PyNCCL backend. "
+                "Stateless elastic EP requires PyNCCL or NIXL backend. "
                 "Forcing EPLB communicator to 'pynccl'."
             )
             backend = "pynccl"
-        return _create_pynccl()
+        if backend == "pynccl":
+            return _create_pynccl()
 
     if backend == "nixl":
         if not has_nixl():
