@@ -1898,6 +1898,23 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.eep_scaling_state = None
 
             executed = self._process_engine_step()
+
+            # [EEP-DBG] heartbeat while scaling: confirms existing ranks keep
+            # doing forward passes during the handshake, and pinpoints when a
+            # rank stops stepping (e.g. enters a barrier / blocks).
+            if self.eep_scaling_state is not None:
+                now = time.time()
+                if now - getattr(self, "_dbg_last_hb", 0.0) > 2.0:
+                    logger.info(
+                        "[EEP-DBG] busy_loop dp_rank=%s eep_state=%s executed=%s "
+                        "unfinished=%s running=%s",
+                        self.dp_rank,
+                        self.eep_scaling_state.state.name,
+                        executed,
+                        self.scheduler.has_unfinished_requests(),
+                        self.scheduler.get_num_unfinished_requests(),
+                    )
+                    self._dbg_last_hb = now
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()

@@ -130,7 +130,35 @@ class ElasticEPScalingState:
             raise RuntimeError("Engine core has been garbage collected")
         return engine_core
 
+    def _dbg_rank(self) -> int:
+        try:
+            return self.engine_core.dp_rank
+        except Exception:
+            return -1
+
+    def _dbg_throttle(self, key: str, msg: str, *args) -> None:
+        # [EEP-DBG] throttled logging: log at most once every 2s per key.
+        now = time.time()
+        store = getattr(self, "_dbg_throttle_times", None)
+        if store is None:
+            store = {}
+            self._dbg_throttle_times = store
+        if now - store.get(key, 0.0) > 2.0:
+            logger.info(msg, *args)
+            store[key] = now
+
     def progress(self) -> bool:
+        # [EEP-DBG] log state transitions only (progress() is called every
+        # busy-loop iteration, so logging unconditionally would be too noisy).
+        if getattr(self, "_dbg_last_state", None) != self.state:
+            logger.info(
+                "[EEP-DBG] dp_rank=%s type=%s scale=%s STATE=%s",
+                self._dbg_rank(),
+                self.worker_type,
+                self.scale_type,
+                self.state.name,
+            )
+            self._dbg_last_state = self.state
         if self.scale_type == "scale_up":
             return (
                 self._progress_new_engine()
@@ -156,6 +184,7 @@ class ElasticEPScalingState:
         dp_store.set(arrival_key, b"1")
 
         start_time = time.time()
+        last_log_time = start_time
         processes_arrived: set[int] = set()
 
         while len(processes_arrived) < group_size:
@@ -177,6 +206,20 @@ class ElasticEPScalingState:
                     processes_arrived.add(i)
 
             if len(processes_arrived) < group_size:
+                # [EEP-DBG] throttled heartbeat while waiting for peers.
+                now = time.time()
+                if now - last_log_time > 2.0:
+                    logger.info(
+                        "[EEP-DBG] rank=%s WAITING in barrier %s: arrived=%s/%s "
+                        "timeout=%s elapsed=%.1fs",
+                        group_rank,
+                        barrier_id,
+                        sorted(processes_arrived),
+                        group_size,
+                        "None" if timeout is None else timeout.total_seconds(),
+                        now - start_time,
+                    )
+                    last_log_time = now
                 sched_yield()
 
     def _staged_barrier(self, use_new_group: bool, barrier_name: str) -> bool:
@@ -208,20 +251,45 @@ class ElasticEPScalingState:
         # TODO(yongji): figure out appropriate timeout for the barrier
         timeout = None if dp_store.check([sync_key]) else timedelta(seconds=5)
 
+        logger.info(
+            "[EEP-DBG] rank=%s ENTER staged_barrier name=%s use_new_group=%s "
+            "group_size=%s timeout=%s",
+            group_rank,
+            barrier_name,
+            use_new_group,
+            group_size,
+            "None" if timeout is None else timeout.total_seconds(),
+        )
         try:
             self._execute_tcp_store_barrier(
                 dp_store, group_rank, group_size, barrier_id, timeout=timeout
+            )
+            logger.info(
+                "[EEP-DBG] rank=%s tcp-stage PASSED, entering dist.barrier name=%s",
+                group_rank,
+                barrier_name,
             )
             torch.distributed.barrier(dp_group)
             if group_rank == 0:
                 dp_store.delete_key(sync_key)
                 for i in range(group_size):
                     dp_store.delete_key(f"arrival_{barrier_id}_{i}")
+            logger.info(
+                "[EEP-DBG] rank=%s staged_barrier name=%s RESULT=PASSED",
+                group_rank,
+                barrier_name,
+            )
             return True
         except _BarrierTimeoutError as e:
             if timeout is None:
                 raise RuntimeError("Unexpected timeout encountered") from e
             dp_store.compare_set(sync_key, "", b"1")
+            logger.info(
+                "[EEP-DBG] rank=%s staged_barrier name=%s RESULT=TIMEOUT "
+                "(will retry, sync_key set)",
+                group_rank,
+                barrier_name,
+            )
             return False
 
     def _progress_existing_engine(self) -> bool:
@@ -233,10 +301,16 @@ class ElasticEPScalingState:
 
         elif state == ScaleUpExistingEngineState.CREATE_STANDBY_GROUPS:
             # NOTE(yongji): wait for all existing workers to receive the request
-            if (
-                int(self.old_dp_store.get("eep_barrier_engine_count"))
-                < self.old_dp_group.size()
-            ):
+            cnt = int(self.old_dp_store.get("eep_barrier_engine_count"))
+            if cnt < self.old_dp_group.size():
+                self._dbg_throttle(
+                    "wait_create_standby",
+                    "[EEP-DBG] rank=%s CREATE_STANDBY_GROUPS waiting for "
+                    "engine_count=%s/%s",
+                    self._dbg_rank(),
+                    cnt,
+                    self.old_dp_group.size(),
+                )
                 return False
             if not self._staged_barrier(
                 use_new_group=False, barrier_name="create_standby_groups"
@@ -257,10 +331,16 @@ class ElasticEPScalingState:
             return False
 
         elif state == ScaleUpExistingEngineState.TRANSFER_WEIGHTS:
-            if (
-                int(self.old_dp_store.get("eep_barrier_engine_count"))
-                < self.old_dp_group.size()
-            ):
+            cnt = int(self.old_dp_store.get("eep_barrier_engine_count"))
+            if cnt < self.old_dp_group.size():
+                self._dbg_throttle(
+                    "wait_transfer_weights",
+                    "[EEP-DBG] rank=%s TRANSFER_WEIGHTS waiting for "
+                    "engine_count=%s/%s",
+                    self._dbg_rank(),
+                    cnt,
+                    self.old_dp_group.size(),
+                )
                 return False
             if not self._staged_barrier(
                 use_new_group=False, barrier_name="transfer_weights"
@@ -311,11 +391,23 @@ class ElasticEPScalingState:
         assert self.new_dp_group is not None and self.new_dp_store is not None
 
         if state == ScaleUpNewEngineState.PRE_KV_INIT:
+            logger.info(
+                "[EEP-DBG] NEW rank=%s sending WEIGHTS_INIT_READY",
+                self._dbg_rank(),
+            )
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
             )
+            logger.info(
+                "[EEP-DBG] NEW rank=%s calling receive_weights (will block until "
+                "existing ranks transfer_weights)",
+                self._dbg_rank(),
+            )
             self.model_executor.collective_rpc(
                 "elastic_ep_execute", args=("receive_weights",)
+            )
+            logger.info(
+                "[EEP-DBG] NEW rank=%s receive_weights RETURNED", self._dbg_rank()
             )
             self.engine_core.available_gpu_memory_for_kv_cache = (
                 ParallelConfig.sync_kv_cache_memory_size(self.new_dp_group, -1)
@@ -435,12 +527,26 @@ class ElasticEPScalingState:
     def handle_notification(self, notification_type: EEPNotificationType):
         assert self.worker_type != "new"
         assert self.old_dp_store is not None
+        logger.info(
+            "[EEP-DBG] rank=%s handle_notification type=%s current_state=%s",
+            self._dbg_rank(),
+            notification_type.name
+            if isinstance(notification_type, EEPNotificationType)
+            else notification_type,
+            self.state.name,
+        )
         if (
             notification_type == EEPNotificationType.NEW_CORE_ENGINES_INIT_READY
             and self.state == ScaleUpExistingEngineState.WAIT_NEW_CORE_ENGINES_INIT
         ):
             self.old_dp_store.add("eep_barrier_engine_count", 1)
             self.state = ScaleUpExistingEngineState.CREATE_STANDBY_GROUPS
+            logger.info(
+                "[EEP-DBG] rank=%s INIT_READY accepted -> CREATE_STANDBY_GROUPS, "
+                "engine_count=%s",
+                self._dbg_rank(),
+                self.old_dp_store.get("eep_barrier_engine_count"),
+            )
         elif (
             notification_type == EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
             and self.state
@@ -448,6 +554,22 @@ class ElasticEPScalingState:
         ):
             self.old_dp_store.add("eep_barrier_engine_count", 1)
             self.state = ScaleUpExistingEngineState.TRANSFER_WEIGHTS
+            logger.info(
+                "[EEP-DBG] rank=%s WEIGHTS_INIT_READY accepted -> TRANSFER_WEIGHTS, "
+                "engine_count=%s",
+                self._dbg_rank(),
+                self.old_dp_store.get("eep_barrier_engine_count"),
+            )
+        else:
+            logger.info(
+                "[EEP-DBG] rank=%s notification %s IGNORED in state=%s "
+                "(possible lost notification!)",
+                self._dbg_rank(),
+                notification_type.name
+                if isinstance(notification_type, EEPNotificationType)
+                else notification_type,
+                self.state.name,
+            )
 
     def is_complete(self) -> bool:
         if self.scale_type == "scale_up":

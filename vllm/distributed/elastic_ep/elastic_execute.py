@@ -248,6 +248,21 @@ class ElasticEPScalingExecutor:
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
         standby_dp_group = get_standby_dp_group()
         assert standby_dp_group is not None
+        eplb_state = self.worker.model_runner.eplb_state
+        rebalanced = None
+        if eplb_state is not None:
+            rebalanced = {
+                k: v.rebalanced for k, v in eplb_state.model_states.items()
+            }
+        logger.info(
+            "[EEP-DBG] transfer_weights ENTER standby_rank=%s old_dp=%s new_dp=%s "
+            "eplb_is_async=%s rebalanced=%s",
+            standby_dp_group.rank_in_group,
+            old_dp_size,
+            new_dp_size,
+            getattr(eplb_state, "is_async", None),
+            rebalanced,
+        )
         # Broadcast old_dp_size to all workers in standby group
         if standby_dp_group.rank_in_group < old_dp_size:
             old_dp_size_tensor = torch.tensor(
@@ -255,8 +270,17 @@ class ElasticEPScalingExecutor:
             )
         else:
             old_dp_size_tensor = torch.empty(1, dtype=torch.int64, device="cpu")
+        logger.info(
+            "[EEP-DBG] transfer_weights standby_rank=%s about to broadcast "
+            "old_dp_size (src=0)",
+            standby_dp_group.rank_in_group,
+        )
         old_dp_size_tensor = standby_dp_group.tcp_store_group.broadcast(
             old_dp_size_tensor, 0
+        )
+        logger.info(
+            "[EEP-DBG] transfer_weights standby_rank=%s old_dp_size broadcast DONE",
+            standby_dp_group.rank_in_group,
         )
 
         num_new_workers = new_dp_size - old_dp_size
@@ -619,8 +643,19 @@ class ElasticEPScalingExecutor:
 
         # Receive old_dp_size broadcasted during transfer_weights
         old_dp_size_tensor = torch.empty(1, dtype=torch.int64, device="cpu")
+        logger.info(
+            "[EEP-DBG] receive_weights ENTER new_rank=%s new_dp_size=%s about to "
+            "recv old_dp_size broadcast (src=0)",
+            dp_group.rank_in_group,
+            new_dp_size,
+        )
         old_dp_size_tensor = dp_group.tcp_store_group.broadcast(old_dp_size_tensor, 0)
         old_dp_size = int(old_dp_size_tensor[0].item())
+        logger.info(
+            "[EEP-DBG] receive_weights new_rank=%s got old_dp_size=%s",
+            dp_group.rank_in_group,
+            old_dp_size,
+        )
 
         # Calculate which existing worker will send to this new worker
         num_new_workers = new_dp_size - old_dp_size

@@ -84,6 +84,10 @@ def transfer_run_periodically(
         eplb_group = get_eplb_group().device_group
         eplb_cpu_group = get_eplb_group().cpu_group
         ep_rank = eplb_group.rank()
+        logger.info(
+            "[EEP-DBG] async EPLB worker WOKE UP ep_rank=%s (starting transfer cycle)",
+            ep_rank,
+        )
 
         assert state.is_async
         for model_state in state.model_states.values():
@@ -112,6 +116,13 @@ def transfer_run_periodically(
                     [int(model_state.rebalanced)],
                     dtype=torch.int32,
                     device="cpu",
+                )
+                logger.info(
+                    "[EEP-DBG] async EPLB ep_rank=%s layer=%s flag all_reduce "
+                    "(eplb_cpu_group) START rebalanced=%s",
+                    ep_rank,
+                    layer_idx,
+                    model_state.rebalanced,
                 )
                 torch.distributed.all_reduce(flag, group=eplb_cpu_group)
                 if int(flag.item()) != eplb_cpu_group.size():
