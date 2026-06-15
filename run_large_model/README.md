@@ -9,8 +9,10 @@ Run DeepSeek V3 with vLLM on Slurm batch nodes using expert parallelism and NIXL
 | ---------------------- | -------------------------------------------------------------- |
 | `run_bench.sh`         | Submit a static benchmark (no scale-up)                        |
 | `run_bench_scaleup.sh` | Submit a scale-up benchmark                                    |
+| `run_restart_bench.sh` | Submit a restart benchmark (time close+upload cycles)          |
 | `slurm_static.sh`      | Slurm job for static benchmark (do not run directly)           |
 | `slurm_scaleup.sh`     | Slurm job for scale-up benchmark (do not run directly)         |
+| `slurm_restart.sh`     | Slurm job for restart benchmark (do not run directly)          |
 | `config.sh`            | Shared defaults (image, model, ports, timeouts)                |
 | `env.sh`               | Container environment setup                                    |
 | `helpers.sh`           | Reusable functions (IP resolution, health checks, Ray polling) |
@@ -81,6 +83,57 @@ Flow: allocate 5 nodes → start vLLM on 40 GPUs (24 redundant experts) → warm
 | `-N` | Number of 8xH100 nodes | 4        |
 | `-r` | Redundant experts      | 0        |
 | `-t` | Slurm time limit       | 02:00:00 |
+
+
+---
+
+## Run 4 — Restart timing (close + upload)
+
+Bring up a Ray cluster once, then cycle vLLM through a schedule of GPU counts.
+Each cycle is: upload serve → run warmup → close serve. The time of every
+"close + upload" transition is measured and summarized at the end.
+
+```bash
+./run_restart_bench.sh -s "32 40 40 40" -R "0 24 24 24"
+```
+
+Flow: allocate 5 nodes → start Ray once →
+serve 32 (r0) → warmup → close →
+serve 40 (r24) → warmup → close →
+serve 40 (r24) → warmup → close →
+serve 40 (r24) → warmup → close → summary
+
+Ray stays up the whole time; only the vLLM process is cycled (this is the
+"close vLLM and upload again" operation being timed). The default schedule
+produces **3** close+upload measurements (the three transitions into the
+40-GPU serves), and the warmup time is **not** counted in the close+upload
+number.
+
+Redundant experts are per-serve and aligned with `-s`. The defaults give
+32-GPU serves **0** redundant experts and 40-GPU serves **24**
+(`-R "0 24 24 24"`). Override the whole list with `-R`, or use `-r N` to apply
+one value to every serve.
+
+Each serve writes its own log: `vllm_server_<idx>_<gpu>gpu.log`.
+The summary is printed to the Slurm `.out` and saved to `restart_summary.txt`:
+
+```
+transition                                            close(s)  upload(s)  close+up(s)
+#0(32gpu/r0) -> #1(40gpu/r24)                               30        200          230
+#1(40gpu/r24) -> #2(40gpu/r24)                             29        198          227
+#2(40gpu/r24) -> #3(40gpu/r24)                             31        205          236
+average (n=3)                                                                       231
+```
+
+**Options for `run_restart_bench.sh`:**
+
+
+| Flag | Description                                   | Default         |
+| ---- | --------------------------------------------- | --------------- |
+| `-s` | Space-separated GPU counts per serve          | `"32 40 40 40"` |
+| `-R` | Space-separated redundant experts per serve   | `"0 24 24 24"`  |
+| `-r` | Single redundant-expert value for every serve | (overrides -R)  |
+| `-t` | Slurm time limit                              | 01:00:00        |
 
 
 ---
