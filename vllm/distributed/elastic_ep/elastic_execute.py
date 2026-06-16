@@ -195,6 +195,18 @@ class ElasticEPScalingExecutor:
         return method(*args, **kwargs)
 
     def _set_eplb_suppressed(self, suppressed: bool) -> None:
+        if suppressed:
+            # Drain any in-flight async EPLB cycle before suppressing. With
+            # async EPLB the rearrange cycle spans many forward passes; if it
+            # is still running when scaling starts it keeps issuing per-step
+            # cross-rank collectives that desync the existing engines during
+            # the handshake. Suppression stops the main thread from consuming
+            # results but does not finish the cycle, so we drain it explicitly
+            # here while the (old) EP group is still active and all callers are
+            # synchronized. No-op when no cycle is in progress.
+            eplb_state = self.worker.model_runner.eplb_state
+            if eplb_state is not None and eplb_state.is_async:
+                _drain_async_eplb(eplb_state)
         self.worker.model_runner.eep_eplb_suppressed = suppressed
         ep_group = get_standby_ep_group() or get_ep_group()
         if ep_group.rank == 0:
@@ -232,6 +244,15 @@ class ElasticEPScalingExecutor:
             self.worker.vllm_config.parallel_config
         )
         updated_config.parallel_config.data_parallel_size = new_dp_size
+        # For scale-up, drain + suppress EPLB BEFORE building the standby
+        # groups. The standby-group rendezvous (TCPStore waitForWorkers) is a
+        # barrier with the new workers; if an async EPLB cycle is still in
+        # flight at this point it desyncs the existing engines and deadlocks
+        # the rendezvous. Draining here (all existing workers are synchronized
+        # via the collective_rpc that invoked create_standby_groups, and the
+        # old EP group is still active) quiesces EPLB first.
+        if new_dp_size > old_dp_size:
+            self._set_eplb_suppressed(True)
         with set_current_vllm_config(updated_config):
             create_standby_groups(
                 new_dp_size=new_dp_size,
@@ -240,9 +261,7 @@ class ElasticEPScalingExecutor:
                 coord_store_port=reconfig_request.coord_store_port,
                 enable_eplb=updated_config.parallel_config.enable_eplb,
             )
-        if new_dp_size > old_dp_size:
-            self._set_eplb_suppressed(True)
-        elif new_dp_size < old_dp_size:
+        if new_dp_size < old_dp_size:
             self._stage_standby_moe_quant_methods()
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
@@ -386,13 +405,6 @@ class ElasticEPScalingExecutor:
     def switch_and_prepare(self) -> None:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
-
-        # Drain the async worker BEFORE replacing groups/communicator.
-        # The worker uses the current (old) EPLB group for cross-rank
-        # barriers, so it must finish while that group is still active.
-        eplb_state = self.worker.model_runner.eplb_state
-        if eplb_state is not None and eplb_state.is_async:
-            _drain_async_eplb(eplb_state)
 
         self._release_cuda_graphs()
         _replace_active_groups(**pop_standby_groups())
@@ -569,11 +581,6 @@ class ElasticEPScalingExecutor:
         model_config = self.worker.model_runner.model_config
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
         is_async_enabled = eplb_state.is_async
-        if is_async_enabled:
-            # Drain is idempotent: for scale-down, this is the first drain
-            # (groups are still old, so it works). For scale-up, the worker
-            # was already drained in switch_and_prepare — this is a no-op.
-            _drain_async_eplb(eplb_state)
         eplb_state.is_async = False
         if rank_mapping is None:
             eplb_state.rearrange()
